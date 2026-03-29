@@ -11,6 +11,7 @@ The project is based on the repositories listed in the **Acknowledgments** secti
 * **Custom Routing:** Route your traffic through specific TURN protocols and WireGuard endpoints.
 * **Advanced WireGuard Support:** Full support for configuring Private/Public Keys, AllowedIPs, DNS, MTU, and PersistentKeepalive.
 * **1-Click Import:** Quickly import complex configurations via base64-encoded clipboard links (`turnbridge://`).
+* **Multi-Profile Management:** Create, edit, and seamlessly switch between multiple VPN configurations using a convenient dropdown picker.
 
 ## 📸 Screenshot
 ![Main Screen](screen.png)

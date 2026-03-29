@@ -45,8 +45,8 @@ struct TurnBridge: App {
                ]
 
                protocolConfiguration.includeAllNetworks = true
-               protocolConfiguration.excludeAPNs = true
-               protocolConfiguration.excludeCellularServices = true
+               protocolConfiguration.excludeAPNs = false
+               protocolConfiguration.excludeCellularServices = false
 
                tunnelManager.protocolConfiguration = protocolConfiguration
                tunnelManager.isEnabled = true

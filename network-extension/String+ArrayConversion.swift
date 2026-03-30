@@ -8,8 +8,6 @@
 
 import Foundation
 
-import Foundation
-
 extension String {
 
     func splitToArray(separator: Character = ",", trimmingCharacters: CharacterSet? = nil) -> [String] {

@@ -15,7 +15,11 @@ class TunnelDetailTableViewController: UITableViewController {
 
     static let interfaceFields: [TunnelViewModel.InterfaceField] = [
         .name, .publicKey, .addresses,
-        .listenPort, .mtu, .dns
+        .listenPort, .dns, .mtu,
+        .junkPacketCount, .junkPacketMinSize, .junkPacketMaxSize,
+        .initPacketJunkSize, .responsePacketJunkSize, .cookieReplyPacketJunkSize, .transportPacketJunkSize,
+        .initPacketMagicHeader, .responsePacketMagicHeader, .underloadPacketMagicHeader, .transportPacketMagicHeader,
+        .specialJunk1, .specialJunk2, .specialJunk3, .specialJunk4, .specialJunk5
     ]
 
     static let peerFields: [TunnelViewModel.PeerField] = [
@@ -357,6 +361,10 @@ extension TunnelDetailTableViewController {
                 text = tr("tunnelStatusWaiting")
             }
 
+            if tunnel.handshakeState == .waiting {
+                text = tr("tunnelStatusActivating") + " · " + tr("tunnelStatusWaitingForHandshakeHint")
+            }
+
             if tunnel.hasOnDemandRules {
                 text += isOnDemandEngaged ? tr("tunnelStatusAddendumOnDemand") : ""
                 cell.switchView.isUserInteractionEnabled = true
@@ -381,6 +389,9 @@ extension TunnelDetailTableViewController {
             update(cell: cell, with: tunnel)
         }
         cell.hasOnDemandRulesObservationToken = tunnel.observe(\.hasOnDemandRules) { [weak cell] tunnel, _ in
+            update(cell: cell, with: tunnel)
+        }
+        cell.handshakeStateObservationToken = tunnel.observe(\.handshakeState) { [weak cell] tunnel, _ in
             update(cell: cell, with: tunnel)
         }
 

@@ -1,11 +1,12 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+    "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>ITSAppUsesNonExemptEncryption</key>
-	<false/>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
+	<key>CFBundleDisplayName</key>
+	<string>$(PRODUCT_NAME)</string>
 	<key>CFBundleDocumentTypes</key>
 	<array>
 		<dict>
@@ -15,8 +16,6 @@
 			</array>
 			<key>CFBundleTypeIconFiles</key>
 			<array>
-				<string>wireguard_doc_logo_22x29.png</string>
-				<string>wireguard_doc_logo_44x58.png</string>
 				<string>wireguard_doc_logo_64x64.png</string>
 				<string>wireguard_doc_logo_320x320.png</string>
 			</array>
@@ -25,7 +24,7 @@
 			<key>CFBundleTypeRole</key>
 			<string>Viewer</string>
 			<key>LSHandlerRank</key>
-			<string>Default</string>
+			<string>Owner</string>
 			<key>LSItemContentTypes</key>
 			<array>
 				<string>com.wireguard.config.quick</string>
@@ -45,7 +44,7 @@
 		</dict>
 		<dict>
 			<key>CFBundleTypeIconFiles</key>
-			<array/>
+			<array />
 			<key>CFBundleTypeName</key>
 			<string>Text file</string>
 			<key>CFBundleTypeRole</key>
@@ -64,27 +63,28 @@
 	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
-	<key>CFBundleDisplayName</key>
-	<string>$(PRODUCT_NAME)</string>
 	<key>CFBundleName</key>
 	<string>$(PRODUCT_NAME)</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>$(VERSION_NAME)</string>
+	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
-	<string>$(VERSION_ID)</string>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false />
 	<key>LSRequiresIPhoneOS</key>
-	<true/>
+	<true />
 	<key>LSSupportsOpeningDocumentsInPlace</key>
-	<false/>
+	<false />
 	<key>NSCameraUsageDescription</key>
+	<string>Localized</string>
+	<key>NSFaceIDUsageDescription</key>
 	<string>Localized</string>
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>
 	<key>UIRequiredDeviceCapabilities</key>
-	<array>
-	</array>
+	<array />
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
@@ -103,14 +103,12 @@
 		<dict>
 			<key>UTTypeConformsTo</key>
 			<array>
-				<string>public.text</string>
+				<string>public.plain-text</string>
 			</array>
 			<key>UTTypeDescription</key>
 			<string>WireGuard wg-quick configuration file</string>
 			<key>UTTypeIconFiles</key>
 			<array>
-				<string>wireguard_doc_logo_22x29.png</string>
-				<string>wireguard_doc_logo_44x58.png</string>
 				<string>wireguard_doc_logo_64x64.png</string>
 				<string>wireguard_doc_logo_320x320.png</string>
 			</array>
@@ -123,8 +121,6 @@
 			</dict>
 		</dict>
 	</array>
-	<key>NSFaceIDUsageDescription</key>
-	<string>Localized</string>
 	<key>com.wireguard.ios.app_group_id</key>
 	<string>group.$(APP_ID_IOS)</string>
 </dict>

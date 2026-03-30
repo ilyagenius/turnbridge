@@ -92,7 +92,7 @@ extension DNSResolver {
 
 extension Endpoint {
     func withReresolvedIP() throws -> Endpoint {
-        #if os(iOS) || os(tvOS)
+        #if os(iOS)
         let hostname: String
         switch host {
         case .name(let name, _):

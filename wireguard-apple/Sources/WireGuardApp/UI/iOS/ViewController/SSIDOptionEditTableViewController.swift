@@ -193,7 +193,7 @@ extension SSIDOptionEditTableViewController {
     private func selectedSSIDCell(for tableView: UITableView, at indexPath: IndexPath) -> UITableViewCell {
         let cell: EditableTextCell = tableView.dequeueReusableCell(for: indexPath)
         cell.message = selectedSSIDs[indexPath.row]
-        cell.placeholder = tr("tunnelOnDemandSSIDTextFieldPlaceholder")
+        cell.placeholder = tr("SSID") // tunnelOnDemandSSIDTextFieldPlaceholder
         cell.isEditing = true
         cell.onValueBeingEdited = { [weak self, weak cell] text in
             guard let self = self, let cell = cell else { return }

@@ -1,4 +1,4 @@
-// swift-tools-version:5.9
+// swift-tools-version:5.5
 // The swift-tools-version declares the minimum version of Swift required to build this package.
 
 import PackageDescription
@@ -7,8 +7,7 @@ let package = Package(
     name: "WireGuardKit",
     platforms: [
         .macOS(.v12),
-        .iOS(.v16),
-        .tvOS(.v17)
+        .iOS(.v15)
     ],
     products: [
         .library(name: "WireGuardKit", targets: ["WireGuardKit"])
@@ -32,10 +31,19 @@ let package = Package(
                 "go.mod",
                 "go.sum",
                 "api-apple.go",
+                "api-xray.go",
                 "Makefile"
             ],
             publicHeadersPath: ".",
-            linkerSettings: [.linkedLibrary("wg-go")]
+            linkerSettings: [
+                .unsafeFlags(["-L", "Sources/WireGuardKitGo/out"]),
+                .linkedLibrary("wg-go"),
+                .linkedLibrary("resolv")
+            ]
+        ),
+        .testTarget(
+            name: "WireGuardKitTests",
+            dependencies: ["WireGuardKit"]
         )
     ]
 )

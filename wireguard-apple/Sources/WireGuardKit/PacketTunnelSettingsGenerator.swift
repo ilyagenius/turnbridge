@@ -47,6 +47,55 @@ class PacketTunnelSettingsGenerator {
         if let listenPort = tunnelConfiguration.interface.listenPort {
             wgSettings.append("listen_port=\(listenPort)\n")
         }
+
+        if let junkPacketCount = tunnelConfiguration.interface.junkPacketCount {
+            wgSettings.append("jc=\(junkPacketCount)\n")
+        }
+        if let junkPacketMinSize = tunnelConfiguration.interface.junkPacketMinSize {
+            wgSettings.append("jmin=\(junkPacketMinSize)\n")
+        }
+        if let junkPacketMaxSize = tunnelConfiguration.interface.junkPacketMaxSize {
+            wgSettings.append("jmax=\(junkPacketMaxSize)\n")
+        }
+        if let initPacketJunkSize = tunnelConfiguration.interface.initPacketJunkSize {
+            wgSettings.append("s1=\(initPacketJunkSize)\n")
+        }
+        if let responsePacketJunkSize = tunnelConfiguration.interface.responsePacketJunkSize {
+            wgSettings.append("s2=\(responsePacketJunkSize)\n")
+        }
+        if let cookieReplyPacketJunkSize = tunnelConfiguration.interface.cookieReplyPacketJunkSize {
+            wgSettings.append("s3=\(cookieReplyPacketJunkSize)\n")
+        }
+        if let transportPacketJunkSize = tunnelConfiguration.interface.transportPacketJunkSize {
+            wgSettings.append("s4=\(transportPacketJunkSize)\n")
+        }
+        if let initPacketMagicHeader = tunnelConfiguration.interface.initPacketMagicHeader {
+            wgSettings.append("h1=\(initPacketMagicHeader)\n")
+        }
+        if let responsePacketMagicHeader = tunnelConfiguration.interface.responsePacketMagicHeader {
+            wgSettings.append("h2=\(responsePacketMagicHeader)\n")
+        }
+        if let underloadPacketMagicHeader = tunnelConfiguration.interface.underloadPacketMagicHeader {
+            wgSettings.append("h3=\(underloadPacketMagicHeader)\n")
+        }
+        if let transportPacketMagicHeader = tunnelConfiguration.interface.transportPacketMagicHeader {
+            wgSettings.append("h4=\(transportPacketMagicHeader)\n")
+        }
+        if let specialJunk1 = tunnelConfiguration.interface.specialJunk1 {
+            wgSettings.append("i1=\(specialJunk1)\n")
+        }
+        if let specialJunk2 = tunnelConfiguration.interface.specialJunk2 {
+            wgSettings.append("i2=\(specialJunk2)\n")
+        }
+        if let specialJunk3 = tunnelConfiguration.interface.specialJunk3 {
+            wgSettings.append("i3=\(specialJunk3)\n")
+        }
+        if let specialJunk4 = tunnelConfiguration.interface.specialJunk4 {
+            wgSettings.append("i4=\(specialJunk4)\n")
+        }
+        if let specialJunk5 = tunnelConfiguration.interface.specialJunk5 {
+            wgSettings.append("i5=\(specialJunk5)\n")
+        }
         if !tunnelConfiguration.peers.isEmpty {
             wgSettings.append("replace_peers=true\n")
         }
@@ -85,25 +134,11 @@ class PacketTunnelSettingsGenerator {
 
         if !tunnelConfiguration.interface.dnsSearch.isEmpty || !tunnelConfiguration.interface.dns.isEmpty {
             let dnsServerStrings = tunnelConfiguration.interface.dns.map { $0.stringRepresentation }
-
-            let dnsSettings: NEDNSSettings
-            if let dnsHTTPSURL = tunnelConfiguration.interface.dnsHTTPSURL {
-                let dohSettings = NEDNSOverHTTPSSettings(servers: dnsServerStrings)
-                dohSettings.serverURL = dnsHTTPSURL
-                dnsSettings = dohSettings
-            } else if let dnsTLSServerName = tunnelConfiguration.interface.dnsTLSServerName {
-                let dotSettings = NEDNSOverTLSSettings(servers: dnsServerStrings)
-                dotSettings.serverName = dnsTLSServerName
-                dnsSettings = dotSettings
-            } else {
-                dnsSettings = NEDNSSettings(servers: dnsServerStrings)
-            }
-
+            let dnsSettings = NEDNSSettings(servers: dnsServerStrings)
             dnsSettings.searchDomains = tunnelConfiguration.interface.dnsSearch
             if !tunnelConfiguration.interface.dns.isEmpty {
                 dnsSettings.matchDomains = [""] // All DNS queries must first go through the tunnel's DNS
             }
-
             networkSettings.dnsSettings = dnsSettings
         }
 
@@ -116,7 +151,7 @@ class PacketTunnelSettingsGenerator {
          * add a nob, maybe, or iOS will do probing for us.
          */
         if mtu == 0 {
-            #if os(iOS) || os(tvOS)
+            #if os(iOS)
             networkSettings.mtu = NSNumber(value: 1280)
             #elseif os(macOS)
             networkSettings.tunnelOverheadBytes = 80
@@ -129,13 +164,16 @@ class PacketTunnelSettingsGenerator {
 
         let (ipv4Addresses, ipv6Addresses) = addresses()
         let (ipv4IncludedRoutes, ipv6IncludedRoutes) = includedRoutes()
+        let (ipv4ExcludedRoutes, ipv6ExcludedRoutes) = excludedRoutes()
 
         let ipv4Settings = NEIPv4Settings(addresses: ipv4Addresses.map { $0.destinationAddress }, subnetMasks: ipv4Addresses.map { $0.destinationSubnetMask })
         ipv4Settings.includedRoutes = ipv4IncludedRoutes
+        ipv4Settings.excludedRoutes = ipv4ExcludedRoutes
         networkSettings.ipv4Settings = ipv4Settings
 
         let ipv6Settings = NEIPv6Settings(addresses: ipv6Addresses.map { $0.destinationAddress }, networkPrefixLengths: ipv6Addresses.map { $0.destinationNetworkPrefixLength })
         ipv6Settings.includedRoutes = ipv6IncludedRoutes
+        ipv6Settings.excludedRoutes = ipv6ExcludedRoutes
         networkSettings.ipv6Settings = ipv6Settings
 
         return networkSettings
@@ -185,6 +223,34 @@ class PacketTunnelSettingsGenerator {
             }
         }
         return (ipv4IncludedRoutes, ipv6IncludedRoutes)
+    }
+
+    private func excludedRoutes() -> ([NEIPv4Route], [NEIPv6Route]) {
+        var ipv4ExcludedRoutes = [NEIPv4Route]()
+        var ipv6ExcludedRoutes = [NEIPv6Route]()
+        for endpoint in resolvedEndpoints {
+            guard let endpoint = endpoint else { continue }
+            switch endpoint.host {
+            case .ipv4(let address):
+                ipv4ExcludedRoutes.append(NEIPv4Route(destinationAddress: "\(address)", subnetMask: "255.255.255.255"))
+            case .ipv6(let address):
+                ipv6ExcludedRoutes.append(NEIPv6Route(destinationAddress: "\(address)", networkPrefixLength: NSNumber(value: UInt8(128))))
+            default:
+                fatalError()
+            }
+        }
+
+        for peer in tunnelConfiguration.peers {
+            for addressRange in peer.excludeIPs {
+                if addressRange.address is IPv4Address {
+                    ipv4ExcludedRoutes.append(NEIPv4Route(destinationAddress: "\(addressRange.address)", subnetMask: "\(addressRange.subnetMask())"))
+                } else if addressRange.address is IPv6Address {
+                    ipv6ExcludedRoutes.append(NEIPv6Route(destinationAddress: "\(addressRange.address)", networkPrefixLength: NSNumber(value: addressRange.networkPrefixLength)))
+                }
+            }
+        }
+
+        return (ipv4ExcludedRoutes, ipv6ExcludedRoutes)
     }
 
     private class func reresolveEndpoint(endpoint: Endpoint) -> EndpointResolutionResult {

@@ -1,6 +1,6 @@
 # TurnBridge
 
-**TurnBridge** is annetwork utility. It allows you to securely route your iOS network traffic through TURN servers and WireGuard endpoints.
+**TurnBridge** is annetwork utility. It allows you to securely route your iOS network traffic through TURN servers and WireGuard / Amnezia WG endpoints.
 
 To run the application, you must use a [server](https://github.com/cacggghp/vk-turn-proxy/releases/tag/v1.0.0) running on a VPS.
 
@@ -8,8 +8,10 @@ The project is based on the repositories listed in the **Acknowledgments** secti
 
 ## ✨ Features
 
-* **Custom Routing:** Route your traffic through specific TURN protocols and WireGuard endpoints.
-* **Advanced WireGuard Support:** Full support for configuring Private/Public Keys, AllowedIPs, DNS, MTU, and PersistentKeepalive.
+* **Custom Routing:** Route your traffic through specific TURN protocols and WG endpoints.
+* **WireGuard & Amnezia WG Integration:**
+  - Complete WireGuard protocol support with key management, routing, and DNS configuration
+  - Full Amnezia WireGuard obfuscation support including jitter parameters (Jc, Jmin, Jmax), packet size obfuscation (S1-S4), and magic headers (H1-H4)
 * **1-Click Import:** Quickly import complex configurations via base64-encoded clipboard links (`turnbridge://`).
 * **Multi-Profile Management:** Create, edit, and seamlessly switch between multiple VPN configurations using a convenient dropdown picker.
 
@@ -62,7 +64,7 @@ If you already possess a paid Apple Developer certificate (or bought one from th
 
 ## 🛠 Usage (Configuration Import)
 
-TurnBridge uses a specific JSON structure encoded in Base64 for fast configuration imports.
+TurnBridge uses a specific JSON structure encoded in Base64 for fast configuration imports for WireGuard / Amnezia WG.
 
 ### Configuration JSON Structure
 
@@ -122,3 +124,5 @@ This project was made possible thanks to the work of the open-source community. 
 * [WireGuard-Apple](https://github.com/ut360e/wireguard-apple) — Licensed under MIT / GPL.
 * [Wireguardkit](https://github.com/Shahzainali/Wireguardkit) — Licensed under MIT / GPL.
 * [vk-turn-proxy](https://github.com/cacggghp/vk-turn-proxy) — Licensed under the GNU GPL.
+* [Amneziawg-Apple](https://github.com/amnezia-vpn/amneziawg-apple.git) — Licensed under MIT.
+

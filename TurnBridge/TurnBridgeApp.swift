@@ -43,10 +43,16 @@ struct TurnBridge: App {
                 "listenAddr": listenAddr,
                 "nValue": nValue
                ]
+               
+               let defaults = UserDefaults.standard
+               let excludeAPNs = defaults.object(forKey: "excludeAPNs") as? Bool ?? false
+               let excludeCellular = defaults.object(forKey: "excludeCellularServices") as? Bool ?? false
+               let excludeLAN = defaults.object(forKey: "excludeLocalNetworks") as? Bool ?? true
 
                protocolConfiguration.includeAllNetworks = true
-               protocolConfiguration.excludeAPNs = false
-               protocolConfiguration.excludeCellularServices = false
+               protocolConfiguration.excludeAPNs = excludeAPNs
+               protocolConfiguration.excludeCellularServices = excludeCellular
+               protocolConfiguration.excludeLocalNetworks = excludeLAN
 
                tunnelManager.protocolConfiguration = protocolConfiguration
                tunnelManager.isEnabled = true

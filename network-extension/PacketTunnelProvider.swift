@@ -19,9 +19,11 @@ private let goProxyCLoggerCallback: @convention(c) (UnsafeMutableRawPointer?, In
     let message = String(cString: cStr).trimmingCharacters(in: .newlines)
     
     if level == 1 {
-        sharedLogger.error("🔴 [GO PROXY]: \(message, privacy: .public)")
+        sharedLogger.error("🔴 [TP]: \(message, privacy: .public)")
+        SharedLogger.log("🔴 [TP]: \(message)")
     } else {
-        sharedLogger.log("🔵 [GO PROXY]: \(message, privacy: .public)")
+        sharedLogger.log("🔵 [TP]: \(message, privacy: .public)")
+        SharedLogger.log("🔵 [TP]: \(message)")
     }
 }
 
@@ -30,12 +32,17 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private lazy var adapter: WireGuardAdapter = {
         return WireGuardAdapter(with: self) { [weak self] _, message in
             sharedLogger.log("🛡 [WG]: \(message, privacy: .public)")
+            SharedLogger.log("🛡 [WG]: \(message)")
         }
     }()
 
     
     override func startTunnel(options: [String : NSObject]?, completionHandler: @escaping (Error?) -> Void) {
         sharedLogger.log("=== Starting tunnel ===")
+        
+        SharedLogger.clearLogs()
+        SharedLogger.log("Starting the tunnel")
+        
         guard let protocolConfiguration = self.protocolConfiguration as? NETunnelProviderProtocol,
               let providerConfiguration = protocolConfiguration.providerConfiguration else {
             sharedLogger.error("Invalid provider configuration")

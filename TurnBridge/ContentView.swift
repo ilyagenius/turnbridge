@@ -92,17 +92,24 @@ struct ContentView: View {
                     }
                     .disabled(vpnStatus != .disconnected)
                 }
-
-                ToolbarItem(placement: .navigationBarTrailing) {
+                
+                ToolbarItemGroup(placement: .navigationBarTrailing) {
                     Button(action: {
                         guard let id = store.selectedProfileID else { return }
                         settingsSheet = SettingsSheet(profileID: id, isNew: false)
                     }) {
-                        Image(systemName: "gearshape.fill")
+                        Image(systemName: "slider.horizontal.3")
                             .font(.title3)
                             .foregroundColor(.primary)
                     }
                     .disabled(vpnStatus != .disconnected || store.selectedProfile == nil)
+                    
+                    NavigationLink(destination: GlobalSettingsView()) {
+                        Image(systemName: "gearshape.fill")
+                            .font(.title3)
+                            .foregroundColor(.primary)
+                    }
+                    .disabled(vpnStatus != .disconnected)
                 }
             }
             .sheet(item: $settingsSheet) { sheet in
@@ -123,7 +130,7 @@ struct ContentView: View {
             }
         }
     }
-
+    
     private var profilePicker: some View {
         Menu {
             ForEach(store.profiles) { profile in

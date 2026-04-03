@@ -120,7 +120,20 @@ struct ContentView: View {
             .onAppear(perform: checkInitialStatus)
             .onReceive(NotificationCenter.default.publisher(for: .NEVPNStatusDidChange)) { notification in
                 if let connection = notification.object as? NEVPNConnection {
-                    withAnimation { self.vpnStatus = connection.status }
+                    let newStatus = connection.status
+                    let statusName: String = {
+                        switch newStatus {
+                        case .connected:     return "Connected"
+                        case .connecting:    return "Connecting"
+                        case .disconnected:  return "Disconnected"
+                        case .disconnecting: return "Disconnecting"
+                        case .reasserting:   return "Reasserting"
+                        case .invalid:       return "Invalid"
+                        @unknown default:    return "Unknown"
+                        }
+                    }()
+                    SharedLogger.info("VPN status: \(statusName)")
+                    withAnimation { self.vpnStatus = newStatus }
                 }
             }
             .alert(alertTitle, isPresented: $showingAlert) {
@@ -262,14 +275,17 @@ struct ContentView: View {
 
     private func toggleTunnel() {
         if vpnStatus == .connected {
+            SharedLogger.info("User requested disconnect")
             app.turnOffTunnel()
         } else {
             guard let profile = store.selectedProfile else { return }
             if let errorMessage = validateConfig(profile) {
+                SharedLogger.warning("Config validation failed: \(errorMessage)")
                 showAlert(title: "Configuration Required", message: errorMessage)
                 return
             }
 
+            SharedLogger.info("User requested connect with profile \"\(profile.name)\"")
             vpnStatus = .connecting
             app.turnOnTunnel(
                 vkLink: profile.vkLink,
@@ -280,7 +296,7 @@ struct ContentView: View {
             ) { isSuccess in
                 if !isSuccess {
                     vpnStatus = .disconnected
-                    print("Failed to turn on tunnel")
+                    SharedLogger.error("Tunnel start failed")
                 }
             }
         }
@@ -298,6 +314,7 @@ struct ContentView: View {
 
     private func importFromClipboard() {
         guard let clipboardString = UIPasteboard.general.string else {
+            SharedLogger.warning("Clipboard import failed: clipboard is empty")
             withAnimation { showImportModal = false }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                 showAlert(title: "Error", message: "Clipboard is empty.")
@@ -305,6 +322,7 @@ struct ContentView: View {
             return
         }
 
+        SharedLogger.debug("Parsing clipboard config (\(clipboardString.count) chars)")
         do {
             let config = try ConfigParser.parse(from: clipboardString)
             let profile = VPNProfile(
@@ -316,12 +334,14 @@ struct ContentView: View {
                 wgQuickConfig: config.wg
             )
             store.addProfile(profile)
+            SharedLogger.info("Profile \"\(store.selectedProfile?.name ?? "")\" imported from clipboard")
 
             withAnimation { showImportModal = false }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                 showAlert(title: "Success", message: "Profile \"\(store.selectedProfile?.name ?? "")\" imported.")
             }
         } catch {
+            SharedLogger.error("Clipboard import failed: \(error.localizedDescription)")
             withAnimation { showImportModal = false }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                 showAlert(title: "Error", message: error.localizedDescription)
@@ -333,6 +353,7 @@ struct ContentView: View {
         withAnimation { showImportModal = false }
         let profile = VPNProfile(name: "Profile")
         store.addProfile(profile)
+        SharedLogger.info("New manual profile created: \"\(store.selectedProfile?.name ?? "")\"")
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
             settingsSheet = SettingsSheet(profileID: profile.id, isNew: true)
         }

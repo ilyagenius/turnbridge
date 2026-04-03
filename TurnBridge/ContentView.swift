@@ -84,32 +84,33 @@ struct ContentView: View {
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
                     Button(action: {
-                        withAnimation { showImportModal = true }
+                        if vpnStatus == .disconnected {
+                            withAnimation { showImportModal = true }
+                        }
                     }) {
                         Image(systemName: "plus")
                             .font(.system(size: 22, weight: .bold))
-                            .foregroundColor(.primary)
+                            .foregroundColor(vpnStatus == .disconnected ? .primary : .secondary)
                     }
-                    .disabled(vpnStatus != .disconnected)
                 }
-                
+
                 ToolbarItemGroup(placement: .navigationBarTrailing) {
                     Button(action: {
                         guard let id = store.selectedProfileID else { return }
-                        settingsSheet = SettingsSheet(profileID: id, isNew: false)
+                        if vpnStatus == .disconnected {
+                            settingsSheet = SettingsSheet(profileID: id, isNew: false)
+                        }
                     }) {
                         Image(systemName: "slider.horizontal.3")
                             .font(.title3)
-                            .foregroundColor(.primary)
+                            .foregroundColor(vpnStatus == .disconnected && store.selectedProfile != nil ? .primary : .secondary)
                     }
-                    .disabled(vpnStatus != .disconnected || store.selectedProfile == nil)
-                    
+
                     NavigationLink(destination: GlobalSettingsView()) {
                         Image(systemName: "gearshape.fill")
                             .font(.title3)
                             .foregroundColor(.primary)
                     }
-                    .disabled(vpnStatus != .disconnected)
                 }
             }
             .sheet(item: $settingsSheet) { sheet in

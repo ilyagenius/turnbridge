@@ -39,8 +39,6 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     
     override func startTunnel(options: [String : NSObject]?, completionHandler: @escaping (Error?) -> Void) {
         sharedLogger.log("=== Starting tunnel ===")
-
-        SharedLogger.clearLogs()
         SharedLogger.info("Starting tunnel", source: .tunnel)
 
         guard let protocolConfiguration = self.protocolConfiguration as? NETunnelProviderProtocol,

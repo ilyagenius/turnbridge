@@ -1,6 +1,5 @@
 import SwiftUI
 import NetworkExtension
-import Network
 
 struct SettingsSheet: Identifiable {
     let id = UUID()
@@ -19,7 +18,6 @@ struct ContentView: View {
     @State private var alertTitle = ""
     @State private var alertMessage = ""
     @State private var settingsSheet: SettingsSheet?
-    @State private var showCaptcha = false
 
     var body: some View {
         NavigationStack {
@@ -143,16 +141,6 @@ struct ContentView: View {
                 Button("OK", role: .cancel) { }
             } message: {
                 Text(alertMessage)
-            }
-            .sheet(isPresented: $showCaptcha) {
-                CaptchaSheetView {
-                    showCaptcha = false
-                    // Retry connection after user solved captcha
-                    toggleTunnel()
-                } onCancel: {
-                    showCaptcha = false
-                    vpnStatus = .disconnected
-                }
             }
         }
     }
@@ -310,17 +298,6 @@ struct ContentView: View {
                 if !isSuccess {
                     vpnStatus = .disconnected
                     SharedLogger.error("Tunnel start failed")
-
-                    // If on WiFi, show captcha for manual solving
-                    if Self.isOnWiFi() {
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                            let logs = SharedLogger.readLogs()
-                            let recent = logs.suffix(10).joined(separator: " ")
-                            if recent.contains("CAPTCHA") || recent.contains("BOT") {
-                                showCaptcha = true
-                            }
-                        }
-                    }
                 }
             }
         }
@@ -387,20 +364,5 @@ struct ContentView: View {
         alertTitle = title
         alertMessage = message
         showingAlert = true
-    }
-
-    static func isOnWiFi() -> Bool {
-        let monitor = NWPathMonitor()
-        let semaphore = DispatchSemaphore(value: 0)
-        var result = false
-        monitor.pathUpdateHandler = { path in
-            result = path.usesInterfaceType(.wifi)
-            semaphore.signal()
-        }
-        let queue = DispatchQueue(label: "wifi-check")
-        monitor.start(queue: queue)
-        _ = semaphore.wait(timeout: .now() + 1)
-        monitor.cancel()
-        return result
     }
 }

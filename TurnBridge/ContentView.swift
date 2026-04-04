@@ -18,98 +18,102 @@ struct ContentView: View {
     @State private var alertTitle = ""
     @State private var alertMessage = ""
     @State private var settingsSheet: SettingsSheet?
+    @State private var showCaptchaWebView = false
+    @State private var captchaSessionToken = ""
 
     var body: some View {
-        NavigationStack {
-            VStack {
-                VStack(spacing: 4) {
-                    Text("TurnBridge")
-                        .font(.system(size: 46, weight: .heavy, design: .rounded))
-                        .foregroundStyle(
-                            LinearGradient(
-                                colors: [.blue, .cyan],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
+        ZStack {
+            NavigationStack {
+                VStack {
+                    VStack(spacing: 4) {
+                        Text("TurnBridge")
+                            .font(.system(size: 46, weight: .heavy, design: .rounded))
+                            .foregroundStyle(
+                                LinearGradient(
+                                    colors: [.blue, .cyan],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                )
                             )
-                        )
-                        .shadow(color: .blue.opacity(0.3), radius: 10, x: 0, y: 5)
+                            .shadow(color: .blue.opacity(0.3), radius: 10, x: 0, y: 5)
 
-                    Text("v\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?")")
-                        .font(.system(size: 14, weight: .medium, design: .rounded))
-                        .foregroundColor(.secondary)
-                }
-                .padding(.top, 30)
+                        Text("v\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?")")
+                            .font(.system(size: 14, weight: .medium, design: .rounded))
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(.top, 30)
 
-                if !store.profiles.isEmpty {
-                    profilePicker
-                        .padding(.top, 12)
+                    if !store.profiles.isEmpty {
+                        profilePicker
+                            .padding(.top, 12)
+                            .padding(.horizontal, 40)
+                            .disabled(vpnStatus != .disconnected)
+                    }
+
+                    Spacer()
+
+                    VStack(spacing: 50) {
+                        Image(systemName: vpnStatus == .connected ? "lock.shield.fill" : "lock.shield")
+                            .resizable()
+                            .scaledToFit()
+                            .frame(width: 120, height: 120)
+                            .foregroundColor(iconColor)
+                            .shadow(color: iconColor.opacity(0.4), radius: vpnStatus == .connected ? 20 : 0)
+                            .scaleEffect(vpnStatus == .connecting ? 1.1 : 1.0)
+                            .animation(vpnStatus == .connecting ? .easeInOut(duration: 1).repeatForever() : .default, value: vpnStatus)
+
+                        Button(action: toggleTunnel) {
+                            Text(buttonText)
+                                .font(.title3)
+                                .fontWeight(.semibold)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 18)
+                                .background(buttonColor)
+                                .foregroundColor(.white)
+                                .cornerRadius(16)
+                                .shadow(color: buttonColor.opacity(0.4), radius: 8, x: 0, y: 4)
+                        }
+                        .disabled(vpnStatus == .connecting || vpnStatus == .disconnecting || store.selectedProfile == nil)
                         .padding(.horizontal, 40)
-                        .disabled(vpnStatus != .disconnected)
-                }
-
-                Spacer()
-
-                VStack(spacing: 50) {
-                    Image(systemName: vpnStatus == .connected ? "lock.shield.fill" : "lock.shield")
-                        .resizable()
-                        .scaledToFit()
-                        .frame(width: 120, height: 120)
-                        .foregroundColor(iconColor)
-                        .shadow(color: iconColor.opacity(0.4), radius: vpnStatus == .connected ? 20 : 0)
-                        .scaleEffect(vpnStatus == .connecting ? 1.1 : 1.0)
-                        .animation(vpnStatus == .connecting ? .easeInOut(duration: 1).repeatForever() : .default, value: vpnStatus)
-
-                    Button(action: toggleTunnel) {
-                        Text(buttonText)
-                            .font(.title3)
-                            .fontWeight(.semibold)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 18)
-                            .background(buttonColor)
-                            .foregroundColor(.white)
-                            .cornerRadius(16)
-                            .shadow(color: buttonColor.opacity(0.4), radius: 8, x: 0, y: 4)
                     }
-                    .disabled(vpnStatus == .connecting || vpnStatus == .disconnecting || store.selectedProfile == nil)
-                    .padding(.horizontal, 40)
-                }
 
-                Spacer()
-            }
-            .overlay {
-                if showImportModal {
-                    importModalView
+                    Spacer()
                 }
-            }
-            .toolbar {
-                ToolbarItem(placement: .navigationBarLeading) {
-                    Button(action: {
-                        if vpnStatus == .disconnected {
-                            withAnimation { showImportModal = true }
+                .overlay {
+                    if showImportModal {
+                        importModalView
+                    }
+                }
+                .toolbar {
+                    ToolbarItem(placement: .navigationBarLeading) {
+                        Button(action: {
+                            if vpnStatus == .disconnected {
+                                withAnimation { showImportModal = true }
+                            }
+                        }) {
+                            Image(systemName: "plus")
+                                .font(.system(size: 22, weight: .bold))
+                                .foregroundColor(vpnStatus == .disconnected ? .primary : .secondary)
                         }
-                    }) {
-                        Image(systemName: "plus")
-                            .font(.system(size: 22, weight: .bold))
-                            .foregroundColor(vpnStatus == .disconnected ? .primary : .secondary)
                     }
-                }
 
-                ToolbarItemGroup(placement: .navigationBarTrailing) {
-                    Button(action: {
-                        guard let id = store.selectedProfileID else { return }
-                        if vpnStatus == .disconnected {
-                            settingsSheet = SettingsSheet(profileID: id, isNew: false)
+                    ToolbarItemGroup(placement: .navigationBarTrailing) {
+                        Button(action: {
+                            guard let id = store.selectedProfileID else { return }
+                            if vpnStatus == .disconnected {
+                                settingsSheet = SettingsSheet(profileID: id, isNew: false)
+                            }
+                        }) {
+                            Image(systemName: "slider.horizontal.3")
+                                .font(.title3)
+                                .foregroundColor(vpnStatus == .disconnected && store.selectedProfile != nil ? .primary : .secondary)
                         }
-                    }) {
-                        Image(systemName: "slider.horizontal.3")
-                            .font(.title3)
-                            .foregroundColor(vpnStatus == .disconnected && store.selectedProfile != nil ? .primary : .secondary)
-                    }
 
-                    NavigationLink(destination: GlobalSettingsView()) {
-                        Image(systemName: "gearshape.fill")
-                            .font(.title3)
-                            .foregroundColor(.primary)
+                        NavigationLink(destination: GlobalSettingsView()) {
+                            Image(systemName: "gearshape.fill")
+                                .font(.title3)
+                                .foregroundColor(.primary)
+                        }
                     }
                 }
             }
@@ -298,12 +302,46 @@ struct ContentView: View {
                 if !isSuccess {
                     vpnStatus = .disconnected
                     SharedLogger.error("Tunnel start failed")
+
+                    // Check if error is CAPTCHA_REQUIRED on WiFi
+                    if NetworkTypeDetector.shared.isWiFi {
+                        showCaptchaWebView = true
+                        captchaSessionToken = "wifi-captcha-token"
+                    }
+            }
+
+            if showCaptchaWebView {
+                VStack {
+                    HStack {
+                        Text("Solve CAPTCHA")
+                            .font(.headline)
+                        Spacer()
+                        Button("Done") {
+                            showCaptchaWebView = false
+                            // Try connecting again after captcha is solved
+                            toggleTunnel()
+                        }
+                    }
+                    .padding()
+
+                    CaptchaWebViewSimple(
+                        onDismiss: {
+                            showCaptchaWebView = false
+                        },
+                        onSuccess: {
+                            showCaptchaWebView = false
+                            toggleTunnel()
+                        }
+                    )
                 }
+                .background(Color.white)
             }
         }
     }
 
     private func checkInitialStatus() {
+        NetworkTypeDetector.shared.startMonitoring()
+
         NETunnelProviderManager.loadAllFromPreferences { managers, error in
             if let manager = managers?.first {
                 self.vpnStatus = manager.connection.status

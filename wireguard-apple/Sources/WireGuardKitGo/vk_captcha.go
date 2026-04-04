@@ -11,6 +11,7 @@ import (
     "fmt"
     "io"
     "log"
+    "math"
     mathrand "math/rand"
     "net"
     "net/http"
@@ -226,6 +227,63 @@ func solvePoW(powInput string, difficulty int) string {
     return ""
 }
 
+// Generate realistic cursor path with natural acceleration/deceleration
+func generateRealisticCursorPath(screenW, screenH int) []map[string]interface{} {
+    var cursor []map[string]interface{}
+
+    // Start from somewhere off the widget (natural browsing position)
+    startX := float64(100 + mathrand.Intn(300))
+    startY := float64(100 + mathrand.Intn(200))
+
+    // Target: center of captcha widget with slight randomness
+    targetX := float64(screenW/2 + mathrand.Intn(100) - 50)
+    targetY := float64(screenH/2 + mathrand.Intn(80) - 40)
+
+    // Generate main movement path with S-curve acceleration
+    totalSteps := 35 + mathrand.Intn(25) // 35-60 steps
+    for i := 0; i < totalSteps; i++ {
+        t := float64(i) / float64(totalSteps)
+
+        // S-curve (sigmoid): slow start, fast middle, slow end
+        ease := (1 - math.Cos(math.Pi*t)) / 2
+
+        x := startX + (targetX-startX)*ease
+        y := startY + (targetY-startY)*ease
+
+        // Add natural hand tremor/micro-movements
+        tremor := float64(1 + mathrand.Intn(2))
+        x += (float64(mathrand.Intn(10)) - 5) / tremor
+        y += (float64(mathrand.Intn(8)) - 4) / tremor
+
+        cursor = append(cursor, map[string]interface{}{
+            "x": int(x),
+            "y": int(y),
+        })
+    }
+
+    // Fine adjustment phase: hover around target with small movements
+    for attempt := 0; attempt < 2+mathrand.Intn(2); attempt++ {
+        offsetX := float64(mathrand.Intn(20) - 10)
+        offsetY := float64(mathrand.Intn(15) - 7)
+
+        adjustX := targetX + offsetX
+        adjustY := targetY + offsetY
+
+        points := 4 + mathrand.Intn(3)
+        for j := 0; j < points; j++ {
+            cursor = append(cursor, map[string]interface{}{
+                "x": int(adjustX) + mathrand.Intn(4) - 2,
+                "y": int(adjustY) + mathrand.Intn(4) - 2,
+            })
+        }
+
+        // Small pause between adjustments
+        time.Sleep(time.Duration(100+mathrand.Intn(150)) * time.Millisecond)
+    }
+
+    return cursor
+}
+
 func callCaptchaNotRobot(ctx context.Context, sessionToken, hash string) (string, error) {
     vkReq := func(method string, postData string) (map[string]interface{}, error) {
         requestURL := "https://api.vk.ru/method/" + method + "?v=5.131"
@@ -308,8 +366,8 @@ func callCaptchaNotRobot(ctx context.Context, sessionToken, hash string) (string
     if err != nil {
         return "", fmt.Errorf("settings failed: %w", err)
     }
-    // Human-like delay: page loading + reading (800-2000ms)
-    time.Sleep(time.Duration(800+mathrand.Intn(1200)) * time.Millisecond)
+    // Human-like delay: page loading + reading (1.5-3 sec)
+    time.Sleep(time.Duration(1500+mathrand.Intn(1500)) * time.Millisecond)
 
     // Step 2/4: componentDone
     log.Printf("[Captcha] Step 2/4: componentDone")
@@ -352,62 +410,36 @@ func callCaptchaNotRobot(ctx context.Context, sessionToken, hash string) (string
     if err != nil {
         return "", fmt.Errorf("componentDone failed: %w", err)
     }
-    // Human-like delay: component rendered, user "looking" at page (1500-4000ms)
-    time.Sleep(time.Duration(1500+mathrand.Intn(2500)) * time.Millisecond)
+    // Human-like delay: component rendered, user analyzing captcha (2-4 sec)
+    time.Sleep(time.Duration(2000+mathrand.Intn(2000)) * time.Millisecond)
 
     // Step 3/4: check
     log.Printf("[Captcha] Step 3/4: check")
 
-    // Realistic cursor movement with acceleration/deceleration (Bezier-like)
-    type Point struct {
-        X int `json:"x"`
-        Y int `json:"y"`
-    }
-    var cursor []Point
-    // Start from a random position (as if mouse was somewhere on page)
-    curX := float64(300 + mathrand.Intn(screenW/2))
-    curY := float64(200 + mathrand.Intn(screenH/3))
-    // Target: roughly center-ish of the captcha widget
-    targetX := float64(screenW/2 + mathrand.Intn(100) - 50)
-    targetY := float64(screenH/2 + mathrand.Intn(60) - 30)
+    // Generate realistic cursor movement
+    cursorData := generateRealisticCursorPath(screenW, screenH)
+    cursorBytes, _ := json.Marshal(cursorData)
 
-    pointsCount := 15 + mathrand.Intn(25) // 15-40 points for realistic path
-    for i := 0; i < pointsCount; i++ {
-        t := float64(i) / float64(pointsCount)
-        // Ease-in-out interpolation
-        ease := t * t * (3 - 2*t)
-        x := curX + (targetX-curX)*ease + float64(mathrand.Intn(8)-4)
-        y := curY + (targetY-curY)*ease + float64(mathrand.Intn(6)-3)
-        cursor = append(cursor, Point{X: int(x), Y: int(y)})
-    }
-    // Add a few points at target (mouse "resting")
-    for i := 0; i < 3+mathrand.Intn(3); i++ {
-        cursor = append(cursor, Point{
-            X: int(targetX) + mathrand.Intn(4) - 2,
-            Y: int(targetY) + mathrand.Intn(4) - 2,
-        })
-    }
-    cursorBytes, _ := json.Marshal(cursor)
-
-    // Realistic downlink: slight fluctuations around a base speed
+    // Realistic network metrics (physical WiFi/mobile values)
+    // WiFi typical: 10-50 Mbps, mobile: 5-30 Mbps
+    baseSpeed := float64(15+mathrand.Intn(25)) + float64(mathrand.Intn(100))/100.0 // 15.0-39.99 Mbps
     var downlink []float64
-    baseSpeed := float64(mathrand.Intn(8)+5) + float64(mathrand.Intn(100))/100.0 // 5.0-12.99
     for i := 0; i < 16; i++ {
-        variation := (float64(mathrand.Intn(200)) - 100) / 100.0 // ±1.0
-        dl := baseSpeed + variation
-        if dl < 1.0 {
-            dl = 1.0
+        // Fluctuation: ±15%
+        variation := (float64(mathrand.Intn(30)) - 15) / 100.0
+        dl := baseSpeed * (1 + variation)
+        if dl < 5.0 {
+            dl = 5.0
         }
-        // Round to 2 decimal places
         downlink = append(downlink, float64(int(dl*100))/100.0)
     }
     downlinkBytes, _ := json.Marshal(downlink)
 
-    // Realistic RTT values: slight fluctuations
+    // Realistic RTT: 20-100ms for typical WiFi/mobile
     var rtt []int
-    baseRtt := 20 + mathrand.Intn(80) // 20-100ms base
+    baseRtt := 25 + mathrand.Intn(60) // 25-85ms
     for i := 0; i < 16; i++ {
-        r := baseRtt + mathrand.Intn(20) - 10
+        r := baseRtt + mathrand.Intn(15) - 7 // ±7ms variation
         if r < 5 {
             r = 5
         }
@@ -454,7 +486,8 @@ func callCaptchaNotRobot(ctx context.Context, sessionToken, hash string) (string
         return "", fmt.Errorf("success_token not found in check response: %v", checkResp)
     }
     
-    time.Sleep(time.Duration(500 + mathrand.Intn(500)) * time.Millisecond)
+    // Delay after solving (600-1500ms)
+    time.Sleep(time.Duration(600+mathrand.Intn(900)) * time.Millisecond)
 
     log.Printf("[Captcha] Step 4/4: endSession")
     _, err = vkReq("captchaNotRobot.endSession", baseParams)

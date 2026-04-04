@@ -186,12 +186,12 @@ func getCreds(link string) (resUser string, resPass string, resTurn string, resE
         if errObj, hasErr := resp[“error”].(map[string]interface{}); hasErr {
             captchaErr := ParseVkCaptchaError(errObj)
             if captchaErr != nil && captchaErr.IsCaptchaError() {
-                log.Println(“[Captcha] A \”Not Robot\” CAPTCHA has been detected; let's solve it...”)
+                log.Println(“[Captcha] A \”Not Robot\” CAPTCHA has been detected; solving...”)
 
                 successToken, solveErr := solveVkCaptcha(context.Background(), captchaErr)
                 if solveErr != nil {
+                    log.Printf(“[Captcha] Solve failed: %v”, solveErr)
                     lastErr = fmt.Errorf(“Unable to solve the CAPTCHA: %v”, solveErr)
-                    log.Printf(“[getCreds] CAPTCHA solve failed: %v, will retry with fresh token...”, solveErr)
                     continue
                 }
 

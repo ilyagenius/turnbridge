@@ -301,13 +301,19 @@ struct ContentView: View {
             ) { isSuccess in
                 if !isSuccess {
                     vpnStatus = .disconnected
-                    SharedLogger.error("Tunnel start failed")
 
-                    // Check if error is CAPTCHA_REQUIRED on WiFi
-                    if NetworkTypeDetector.shared.isWiFi {
-                        showCaptchaWebView = true
-                        captchaSessionToken = "wifi-captcha-token"
+                    // Wait for logs to be written, then check for CAPTCHA error
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                        let logs = SharedLogger.readLogs()
+                        let lastLogs = logs.suffix(5).joined(separator: " ")
+
+                        if NetworkTypeDetector.shared.isWiFi && lastLogs.contains("CAPTCHA") {
+                            showCaptchaWebView = true
+                        } else {
+                            showAlert(title: "Connection Failed", message: "Unable to connect")
+                        }
                     }
+                }
             }
 
             if showCaptchaWebView {

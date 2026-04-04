@@ -1,6 +1,5 @@
 import Foundation
 import Network
-import NetworkExtension
 
 class NetworkTypeDetector {
     static let shared = NetworkTypeDetector()

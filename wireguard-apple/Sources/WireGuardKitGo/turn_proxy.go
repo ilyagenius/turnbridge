@@ -678,6 +678,7 @@ func StartProxy(cLink *C.char, cPeerAddr *C.char, cLocalAddr *C.char, cN C.int) 
         log.Printf("Using WB (Wildberries) TURN provider")
         credFunc = getCredsWB
         link = "" // WB creates its own rooms, no link needed
+        port = "" // WB: use port from TURN server response (3478), don't override
     } else {
         log.Printf("Using VK TURN provider")
         credFunc = getCreds

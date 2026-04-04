@@ -23,12 +23,12 @@ import (
     "log"
     "net"
     "net/http"
+	neturl "net/url"
     "sync"
     "sync/atomic"
     "time"
     "unsafe"
     "strings"
-    mathrand "math/rand"
 
     "github.com/cbeuw/connutil"
     "github.com/google/uuid"
@@ -81,7 +81,14 @@ func init() {
     log.SetOutput(ProxyLogger(0))
 }
 
+type getCredsFunc func(string) (string, string, string, error)
+
 func getCreds(link string) (resUser string, resPass string, resTurn string, resErr error) {
+    profile := getRandomProfile()
+    name := generateName()
+	escapedName := neturl.QueryEscape(name)
+
+    log.Printf("Connecting - Name: %s | UA: %s", name, profile.UserAgent)
 
 	doRequest := func(data string, url string) (resp map[string]interface{}, err error) {
 
@@ -94,23 +101,13 @@ func getCreds(link string) (resUser string, resPass string, resTurn string, resE
 			},
 		}
 		defer client.CloseIdleConnections()
-		req, err := http.NewRequest(“POST”, url, bytes.NewBuffer([]byte(data)))
+		req, err := http.NewRequest("POST", url, bytes.NewBuffer([]byte(data)))
 		if err != nil {
 			return nil, err
 		}
 
-		req.Header.Add(“User-Agent”, commonUserAgent)
-		req.Header.Add(“Content-Type”, “application/x-www-form-urlencoded”)
-		req.Header.Add(“Accept”, “*/*”)
-		req.Header.Add(“Accept-Language”, “ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7”)
-		req.Header.Add(“Origin”, “https://vk.com”)
-		req.Header.Add(“Referer”, “https://vk.com/”)
-		req.Header.Add(“sec-ch-ua-platform”, “\”Windows\””)
-		req.Header.Add(“sec-ch-ua”, “\”Chromium\”;v=\”128\”, \”Not;A=Brand\”;v=\”24\”, \”Google Chrome\”;v=\”128\””)
-		req.Header.Add(“sec-ch-ua-mobile”, “?0”)
-		req.Header.Add(“Sec-Fetch-Site”, “same-site”)
-		req.Header.Add(“Sec-Fetch-Mode”, “cors”)
-		req.Header.Add(“Sec-Fetch-Dest”, “empty”)
+		req.Header.Add("User-Agent", profile.UserAgent)
+		req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
 
 		httpResp, err := client.Do(req)
 		if err != nil {
@@ -118,7 +115,7 @@ func getCreds(link string) (resUser string, resPass string, resTurn string, resE
 		}
 		defer func() {
 			if closeErr := httpResp.Body.Close(); closeErr != nil {
-				log.Printf(“close response body: %s”, closeErr)
+				log.Printf("close response body: %s", closeErr)
 			}
 		}()
 
@@ -138,145 +135,91 @@ func getCreds(link string) (resUser string, resPass string, resTurn string, resE
 	var resp map[string]interface{}
     defer func() {
         if r := recover(); r != nil {
-            log.Printf(“get TURN creds error (bad JSON?): %v\n\n”, resp)
-            resErr = fmt.Errorf(“panic in getCreds: %v”, r)
+            log.Printf("get TURN creds error (bad JSON?): %v\n\n", resp)
+            resErr = fmt.Errorf("panic in getCreds: %v", r)
         }
     }()
 
-    // Retry the entire flow up to 3 times with fresh anon tokens
-    const maxCredsRetries = 3
-    var lastErr error
-
-    for credsAttempt := 0; credsAttempt < maxCredsRetries; credsAttempt++ {
-        if credsAttempt > 0 {
-            delay := time.Duration(5+credsAttempt*5) * time.Second
-            log.Printf(“[getCreds] Retry %d/%d with fresh anon token, waiting %v...”, credsAttempt, maxCredsRetries-1, delay)
-            time.Sleep(delay)
-        }
-
-        data := “client_id=6287487&token_type=messages&client_secret=QbYic1K3lEV5kTGiqlq2&version=1&app_id=6287487”
-        url := “https://login.vk.ru/?act=get_anonym_token”
-
-        resp, err := doRequest(data, url)
-        if err != nil {
-            lastErr = fmt.Errorf(“request error:%s”, err)
-            continue
-        }
-
-        dataObj, ok := resp[“data”].(map[string]interface{})
-        if !ok {
-            lastErr = fmt.Errorf(“unexpected anon token response: %v”, resp)
-            continue
-        }
-        token1, ok := dataObj[“access_token”].(string)
-        if !ok || token1 == “” {
-            lastErr = fmt.Errorf(“no access_token in anon token response: %v”, resp)
-            continue
-        }
-
-        data = fmt.Sprintf(“vk_join_link=https://vk.com/call/join/%s&name=123&access_token=%s”, link, token1)
-        url = “https://api.vk.ru/method/calls.getAnonymousToken?v=5.274&client_id=6287487”
-
-        resp, err = doRequest(data, url)
-        if err != nil {
-            lastErr = fmt.Errorf(“request error:%s”, err)
-            continue
-        }
-
-        if errObj, hasErr := resp[“error”].(map[string]interface{}); hasErr {
-            captchaErr := ParseVkCaptchaError(errObj)
-            if captchaErr != nil && captchaErr.IsCaptchaError() {
-                log.Println(“[Captcha] CAPTCHA_DETECTED: \”Not Robot\” CAPTCHA has been detected”)
-
-                successToken, solveErr := solveVkCaptcha(context.Background(), captchaErr)
-                if solveErr != nil {
-                    log.Printf(“[Captcha] CAPTCHA_SOLVE_FAILED: %v”, solveErr)
-                    lastErr = fmt.Errorf(“Unable to solve the CAPTCHA: %v”, solveErr)
-                    continue
-                }
-
-                log.Println(“[Captcha] Captcha solved, retrying the request...”)
-
-                data = fmt.Sprintf(“vk_join_link=https://vk.com/call/join/%s&name=123”+
-                    “&captcha_sid=%s&is_sound_captcha=0&success_token=%s”+
-                    “&captcha_ts=%s&captcha_attempt=%s&access_token=%s”,
-                    link, captchaErr.CaptchaSid, successToken,
-                    captchaErr.CaptchaTs, captchaErr.CaptchaAttempt, token1)
-
-                resp, err = doRequest(data, url)
-                if err != nil {
-                    lastErr = fmt.Errorf(“re-request error: %s”, err)
-                    continue
-                }
-
-                // Check if VK returned ANOTHER error after captcha solution
-                if _, hasErr2 := resp[“error”].(map[string]interface{}); hasErr2 {
-                    lastErr = fmt.Errorf(“VK API error after captcha solve: %v”, resp[“error”])
-                    log.Printf(“[getCreds] Still got error after captcha: %v, will retry with fresh token...”, resp[“error”])
-                    continue
-                }
-            } else {
-                lastErr = fmt.Errorf(“VK API error: %v”, errObj)
-                continue
-            }
-        }
-
-        // Got a valid response — extract token2 and continue
-        respObj, ok := resp[“response”].(map[string]interface{})
-        if !ok {
-            lastErr = fmt.Errorf(“unexpected response format: %v”, resp)
-            continue
-        }
-        token2, ok := respObj[“token”].(string)
-        if !ok || token2 == “” {
-            lastErr = fmt.Errorf(“no token in response: %v”, resp)
-            continue
-        }
-
-        // Success — proceed to OK calls
-        return getCredsFinish(doRequest, link, token2)
-    }
-
-    return “”, “”, “”, fmt.Errorf(“getCreds failed after %d attempts: %v”, maxCredsRetries, lastErr)
-}
-
-func getCredsFinish(doRequest func(string, string) (map[string]interface{}, error), link, token2 string) (string, string, string, error) {
-	data := fmt.Sprintf(“%s%s%s”, “session_data=%7B%22version%22%3A2%2C%22device_id%22%3A%22”, uuid.New(), “%22%2C%22client_version%22%3A1.1%2C%22client_type%22%3A%22SDK_JS%22%7D&method=auth.anonymLogin&format=JSON&application_key=CGMMEJLGDIHBABABA”)
-	url := “https://calls.okcdn.ru/fb.do”
+	data := "client_id=6287487&token_type=messages&client_secret=QbYic1K3lEV5kTGiqlq2&version=1&app_id=6287487"
+	url := "https://login.vk.ru/?act=get_anonym_token"
 
 	resp, err := doRequest(data, url)
 	if err != nil {
-		return “”, “”, “”, fmt.Errorf(“request error:%s”, err)
+		return "", "", "", fmt.Errorf("request error:%s", err)
 	}
 
-	token3, ok := resp[“session_key”].(string)
-	if !ok || token3 == “” {
-		return “”, “”, “”, fmt.Errorf(“no session_key in OK response: %v”, resp)
-	}
+	token1 := resp["data"].(map[string]interface{})["access_token"].(string)
 
-	data = fmt.Sprintf(“joinLink=%s&isVideo=false&protocolVersion=5&anonymToken=%s&method=vchat.joinConversationByLink&format=JSON&application_key=CGMMEJLGDIHBABABA&session_key=%s”, link, token2, token3)
-	url = “https://calls.okcdn.ru/fb.do”
+	data = fmt.Sprintf("vk_join_link=https://vk.com/call/join/%s&name=%s&access_token=%s", link, escapedName, token1)
+    reqURL := "https://api.vk.ru/method/calls.getAnonymousToken?v=5.274&client_id=6287487"
+
+    var token2 string
+    const maxCaptchaAttempts = 3
+    for attempt := 0; attempt <= maxCaptchaAttempts; attempt++ {
+        resp, err = doRequest(data, reqURL)
+        if err != nil {
+            return "", "", "", fmt.Errorf("request error:%s", err)
+        }
+
+        if errObj, hasErr := resp["error"].(map[string]interface{}); hasErr {
+            errCode, _ := errObj["error_code"].(float64)
+            if errCode == 14 {
+                if attempt == maxCaptchaAttempts {
+                    return "", "", "", fmt.Errorf("captcha failed after %d attempts", maxCaptchaAttempts)
+                }
+
+                captchaErr := ParseVkCaptchaError(errObj)
+                if captchaErr.IsCaptchaError() {
+                    log.Printf("[Captcha] Attempt %d/%d: solving...", attempt+1, maxCaptchaAttempts)
+
+                    successToken, solveErr := solveVkCaptcha(context.Background(), captchaErr)
+                    if solveErr != nil {
+                        return "", "", "", fmt.Errorf("captcha solve error: %v", solveErr)
+                    }
+
+                    if captchaErr.CaptchaAttempt == "0" || captchaErr.CaptchaAttempt == "" {
+                        captchaErr.CaptchaAttempt = "1"
+                    }
+
+                    data = fmt.Sprintf("vk_join_link=https://vk.com/call/join/%s&name=%s"+
+                        "&captcha_key=&captcha_sid=%s&is_sound_captcha=0&success_token=%s"+
+                        "&captcha_ts=%s&captcha_attempt=%s&access_token=%s",
+                        link, escapedName, captchaErr.CaptchaSid, successToken,
+                        captchaErr.CaptchaTs, captchaErr.CaptchaAttempt, token1)
+                    continue
+                }
+            }
+            return "", "", "", fmt.Errorf("VK API error: %v", errObj)
+        }
+
+        token2 = resp["response"].(map[string]interface{})["token"].(string)
+        break
+    }
+
+	data = fmt.Sprintf("%s%s%s", "session_data=%7B%22version%22%3A2%2C%22device_id%22%3A%22", uuid.New(), "%22%2C%22client_version%22%3A1.1%2C%22client_type%22%3A%22SDK_JS%22%7D&method=auth.anonymLogin&format=JSON&application_key=CGMMEJLGDIHBABABA")
+	url = "https://calls.okcdn.ru/fb.do"
 
 	resp, err = doRequest(data, url)
 	if err != nil {
-		return “”, “”, “”, fmt.Errorf(“request error:%s”, err)
+		return "", "", "", fmt.Errorf("request error:%s", err)
 	}
 
-	turnServer, ok := resp[“turn_server”].(map[string]interface{})
-	if !ok {
-		return “”, “”, “”, fmt.Errorf(“no turn_server in response: %v”, resp)
+	token3 := resp["session_key"].(string)
+
+	data = fmt.Sprintf("joinLink=%s&isVideo=false&protocolVersion=5&anonymToken=%s&method=vchat.joinConversationByLink&format=JSON&application_key=CGMMEJLGDIHBABABA&session_key=%s", link, token2, token3)
+	url = "https://calls.okcdn.ru/fb.do"
+
+	resp, err = doRequest(data, url)
+	if err != nil {
+		return "", "", "", fmt.Errorf("request error:%s", err)
 	}
 
-	user, _ := turnServer[“username”].(string)
-	pass, _ := turnServer[“credential”].(string)
-	urls, _ := turnServer[“urls”].([]interface{})
-	if user == “” || pass == “” || len(urls) == 0 {
-		return “”, “”, “”, fmt.Errorf(“incomplete turn_server data: %v”, turnServer)
-	}
-	turn := urls[0].(string)
+	user := resp["turn_server"].(map[string]interface{})["username"].(string)
+	pass := resp["turn_server"].(map[string]interface{})["credential"].(string)
+	turn := resp["turn_server"].(map[string]interface{})["urls"].([]interface{})[0].(string)
 
-	clean := strings.Split(turn, “?”)[0]
-	address := strings.TrimPrefix(strings.TrimPrefix(clean, “turn:”), “turns:”)
+	clean := strings.Split(turn, "?")[0]
+	address := strings.TrimPrefix(strings.TrimPrefix(clean, "turn:"), "turns:")
 
 	return user, pass, address, nil
 }
@@ -426,12 +369,13 @@ type turnParams struct {
 	port     string
 	link     string
 	udp      bool
+	getCreds getCredsFunc
 }
 
 func oneTurnConnection(ctx context.Context, turnParams *turnParams, peer *net.UDPAddr, conn2 net.PacketConn, c chan<- error) {
 	var err error = nil
 	defer func() { c <- err }()
-	user, pass, url, err1 := getCreds(turnParams.link)
+	user, pass, url, err1 := turnParams.getCreds(turnParams.link)
 	if err1 != nil {
 		err = fmt.Errorf("failed to get TURN credentials: %s", err1)
 		return
@@ -644,16 +588,62 @@ func oneTurnConnectionLoop(ctx context.Context, turnParams *turnParams, peer *ne
 				go oneTurnConnection(ctx, turnParams, peer, conn2, c)
 				if err := <-c; err != nil {
 					log.Printf("%s", err)
-					// Delay before next attempt to avoid rate limiting
-					select {
-					case <-ctx.Done():
-						return
-					case <-time.After(5*time.Second + time.Duration(mathrand.Intn(3000))*time.Millisecond):
-					}
 				}
 			default:
 			}
 		}
+	}
+}
+
+type turnCred struct {
+	user, pass, addr string
+}
+
+func poolCreds(f getCredsFunc, poolSize int) getCredsFunc {
+	var mu sync.Mutex
+	var pool []turnCred
+	var cTime time.Time
+	var idx int
+
+	return func(link string) (string, string, string, error) {
+		mu.Lock()
+		defer mu.Unlock()
+
+		if !cTime.IsZero() && time.Since(cTime) > 10*time.Minute {
+			pool = nil
+			cTime = time.Time{}
+		}
+
+		if len(pool) < poolSize {
+			u, p, a, err := f(link)
+			if err == nil {
+				pool = append(pool, turnCred{u, p, a})
+				cTime = time.Now()
+				log.Printf("Successfully registered User Identity %d/%d", len(pool), poolSize)
+
+				// Space out requests by 1000ms to avoid API limits
+				if len(pool) < poolSize {
+					time.Sleep(1000 * time.Millisecond)
+				}
+
+				c := pool[len(pool)-1]
+				idx++
+				return c.user, c.pass, c.addr, nil
+			}
+
+			log.Printf("Failed to get unique TURN identity: %v", err)
+			if len(pool) > 0 {
+				log.Printf("Falling back to reusing a previous identity...")
+				c := pool[idx%len(pool)]
+				idx++
+				return c.user, c.pass, c.addr, nil
+			}
+			return "", "", "", err
+		}
+
+		c := pool[idx%len(pool)]
+		idx++
+		return c.user, c.pass, c.addr, nil
 	}
 }
 
@@ -680,11 +670,22 @@ func StartProxy(cLink *C.char, cPeerAddr *C.char, cLocalAddr *C.char, cN C.int) 
         return
     }
 
-    parts := strings.Split(link, "join/")
-    link = parts[len(parts)-1]
+    // Detect provider from link
+    isWB := strings.Contains(link, "wb") || strings.Contains(link, "wildberries") || strings.Contains(link, "stream.wb")
 
-    if idx := strings.IndexAny(link, "/?#"); idx != -1 {
-        link = link[:idx]
+    var credFunc getCredsFunc
+    if isWB {
+        log.Printf("Using WB (Wildberries) TURN provider")
+        credFunc = getCredsWB
+        link = "" // WB creates its own rooms, no link needed
+    } else {
+        log.Printf("Using VK TURN provider")
+        credFunc = getCreds
+        parts := strings.Split(link, "join/")
+        link = parts[len(parts)-1]
+        if idx := strings.IndexAny(link, "/?#"); idx != -1 {
+            link = link[:idx]
+        }
     }
 
 	params := &turnParams{
@@ -692,6 +693,7 @@ func StartProxy(cLink *C.char, cPeerAddr *C.char, cLocalAddr *C.char, cN C.int) 
 		port:     port,
 		link:     link,
 		udp:      udp,
+		getCreds: poolCreds(credFunc, n),
 	}
 
     listenConnChan := make(chan net.PacketConn)

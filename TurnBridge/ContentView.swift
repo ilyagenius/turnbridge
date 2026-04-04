@@ -19,7 +19,7 @@ struct ContentView: View {
     @State private var alertTitle = ""
     @State private var alertMessage = ""
     @State private var settingsSheet: SettingsSheet?
-    @State private var showCaptcha = false
+    // @State private var showCaptcha = false
 
     var body: some View {
         NavigationStack {
@@ -144,16 +144,7 @@ struct ContentView: View {
             } message: {
                 Text(alertMessage)
             }
-            .sheet(isPresented: $showCaptcha) {
-                CaptchaSheetView {
-                    showCaptcha = false
-                    // Retry connection after user solved captcha
-                    toggleTunnel()
-                } onCancel: {
-                    showCaptcha = false
-                    vpnStatus = .disconnected
-                }
-            }
+            // CaptchaSheetView removed - CAPTCHA is solved automatically in Go code
         }
     }
     
@@ -311,16 +302,7 @@ struct ContentView: View {
                     vpnStatus = .disconnected
                     SharedLogger.error("Tunnel start failed")
 
-                    // If on WiFi, show captcha for manual solving
-                    if Self.isOnWiFi() {
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                            let logs = SharedLogger.readLogs()
-                            let recent = logs.suffix(10).joined(separator: " ")
-                            if recent.contains("CAPTCHA") || recent.contains("BOT") {
-                                showCaptcha = true
-                            }
-                        }
-                    }
+                    // CAPTCHA is solved automatically in Go code
                 }
             }
         }

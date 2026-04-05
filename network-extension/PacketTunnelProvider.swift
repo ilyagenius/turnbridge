@@ -87,17 +87,17 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
 
         DispatchQueue.global(qos: .userInteractive).async { [weak self] in
-            let ready = ProxyWaitReady(12000)
+            let ready = ProxyWaitReady(45000)
             guard let self = self else { return }
 
             if ready == 0 {
-                sharedLogger.error("DTLS connection timeout!")
-                SharedLogger.error("DTLS connection timeout (12s)", source: .tunnel)
+                sharedLogger.error("Proxy transport timeout!")
+                SharedLogger.error("Proxy transport timeout (45s)", source: .tunnel)
                 completionHandler(PacketTunnelProviderError.invalidProtocolConfiguration)
                 return
             }
 
-            SharedLogger.info("DTLS ready, starting WireGuard adapter...", source: .tunnel)
+            SharedLogger.info("Proxy transport ready, starting WireGuard adapter...", source: .tunnel)
             self.adapter.start(tunnelConfiguration: tunnelConfiguration) { [weak self] adapterError in
                 guard let self = self else { return }
                 if let adapterError = adapterError {

@@ -4,6 +4,7 @@
 
 import SwiftUI
 import NetworkExtension
+import Foundation
 
 @main
 struct TurnBridge: App {
@@ -32,8 +33,7 @@ struct TurnBridge: App {
             let currentAppBundleId = Bundle.main.bundleIdentifier ?? "com.netlab.TurnBridge"
             protocolConfiguration.providerBundleIdentifier = "\(currentAppBundleId).network-extension"
 
-            let cleanIP = peerAddr.components(separatedBy: ":").first ?? peerAddr
-            protocolConfiguration.serverAddress = cleanIP
+            protocolConfiguration.serverAddress = resolveServerAddress(vkLink: vkLink, peerAddr: peerAddr)
 
             protocolConfiguration.providerConfiguration = [
                 "wgQuickConfig": wgQuickConfig,
@@ -89,6 +89,19 @@ struct TurnBridge: App {
                 }
             }
         }
+    }
+
+    private func resolveServerAddress(vkLink: String, peerAddr: String) -> String {
+        let trimmedPeer = peerAddr.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedPeer.isEmpty {
+            return trimmedPeer.components(separatedBy: ":").first ?? trimmedPeer
+        }
+
+        if let url = URL(string: vkLink), let host = url.host, !host.isEmpty {
+            return host
+        }
+
+        return "TurnBridge"
     }
 
     func turnOffTunnel() {

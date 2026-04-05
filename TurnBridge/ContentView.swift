@@ -261,11 +261,20 @@ struct ContentView: View {
         }
     }
 
+    private func isJazzProfile(_ profile: VPNProfile) -> Bool {
+        let link = profile.vkLink.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !link.isEmpty else { return false }
+        if link.contains("vk.com/call/join/") || link.contains("wildberries") || link.contains("stream.wb") {
+            return false
+        }
+        return link.hasPrefix("http://") || link.hasPrefix("https://")
+    }
+
     private func validateConfig(_ profile: VPNProfile) -> String? {
         if profile.vkLink.isEmpty {
             return "Please provide a valid TURN Server URL."
         }
-        if profile.peerAddr.isEmpty {
+        if profile.peerAddr.isEmpty && !isJazzProfile(profile) {
             return "Please provide a valid Peer Address."
         }
         if profile.listenAddr.isEmpty {

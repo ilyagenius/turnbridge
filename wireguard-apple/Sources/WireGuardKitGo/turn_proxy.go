@@ -11,31 +11,31 @@ static inline void call_proxy_logger(proxy_logger_fn_t fn, void *ctx, int level,
     }
 }
 */
-import "C" 
+import "C"
 
 import (
-    "bytes"
-    "context"
-    "crypto/tls"
-    "encoding/json"
-    "fmt"
-    "io"
-    "log"
-    "net"
-    "net/http"
+	"bytes"
+	"context"
+	"crypto/tls"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net"
+	"net/http"
 	neturl "net/url"
-    "sync"
-    "sync/atomic"
-    "time"
-    "unsafe"
-    "strings"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+	"unsafe"
 
-    "github.com/cbeuw/connutil"
-    "github.com/google/uuid"
-    "github.com/pion/dtls/v3"
-    "github.com/pion/dtls/v3/pkg/crypto/selfsign"
-    "github.com/pion/logging"
-    "github.com/pion/turn/v5"
+	"github.com/cbeuw/connutil"
+	"github.com/google/uuid"
+	"github.com/pion/dtls/v3"
+	"github.com/pion/dtls/v3/pkg/crypto/selfsign"
+	"github.com/pion/logging"
+	"github.com/pion/turn/v5"
 )
 
 var proxyLoggerFunc C.proxy_logger_fn_t
@@ -44,51 +44,51 @@ var proxyCancel context.CancelFunc
 
 //export ProxySetLogger
 func ProxySetLogger(context unsafe.Pointer, loggerFn C.proxy_logger_fn_t) {
-    proxyLoggerCtx = context
-    proxyLoggerFunc = loggerFn
+	proxyLoggerCtx = context
+	proxyLoggerFunc = loggerFn
 }
 
 var proxyReady = make(chan struct{}, 1)
 
 //export ProxyWaitReady
 func ProxyWaitReady(timeoutMs C.int) C.int {
-    select {
-    case <-proxyReady:
-        return 1
-    case <-time.After(time.Duration(timeoutMs) * time.Millisecond):
-        return 0
-    }
+	select {
+	case <-proxyReady:
+		return 1
+	case <-time.After(time.Duration(timeoutMs) * time.Millisecond):
+		return 0
+	}
 }
 
 type ProxyLogger int
 
 func (l ProxyLogger) Write(p []byte) (n int, err error) {
-    if proxyLoggerFunc == nil {
-        return len(p), nil
-    }
+	if proxyLoggerFunc == nil {
+		return len(p), nil
+	}
 
-    cleanMsg := bytes.TrimRight(p, "\n")
-    cMsg := C.CString(string(cleanMsg))
-    defer C.free(unsafe.Pointer(cMsg))
+	cleanMsg := bytes.TrimRight(p, "\n")
+	cMsg := C.CString(string(cleanMsg))
+	defer C.free(unsafe.Pointer(cMsg))
 
-    C.call_proxy_logger(proxyLoggerFunc, proxyLoggerCtx, C.int(l), cMsg)
+	C.call_proxy_logger(proxyLoggerFunc, proxyLoggerCtx, C.int(l), cMsg)
 
-    return len(p), nil
+	return len(p), nil
 }
 
 func init() {
-    log.SetFlags(0)
-    log.SetOutput(ProxyLogger(0))
+	log.SetFlags(0)
+	log.SetOutput(ProxyLogger(0))
 }
 
 type getCredsFunc func(string) (string, string, string, error)
 
 func getCreds(link string) (resUser string, resPass string, resTurn string, resErr error) {
-    profile := getRandomProfile()
-    name := generateName()
+	profile := getRandomProfile()
+	name := generateName()
 	escapedName := neturl.QueryEscape(name)
 
-    log.Printf("Connecting - Name: %s | UA: %s", name, profile.UserAgent)
+	log.Printf("Connecting - Name: %s | UA: %s", name, profile.UserAgent)
 
 	doRequest := func(data string, url string) (resp map[string]interface{}, err error) {
 
@@ -133,12 +133,12 @@ func getCreds(link string) (resUser string, resPass string, resTurn string, resE
 	}
 
 	var resp map[string]interface{}
-    defer func() {
-        if r := recover(); r != nil {
-            log.Printf("get TURN creds error (bad JSON?): %v\n\n", resp)
-            resErr = fmt.Errorf("panic in getCreds: %v", r)
-        }
-    }()
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("get TURN creds error (bad JSON?): %v\n\n", resp)
+			resErr = fmt.Errorf("panic in getCreds: %v", r)
+		}
+	}()
 
 	data := "client_id=6287487&token_type=messages&client_secret=QbYic1K3lEV5kTGiqlq2&version=1&app_id=6287487"
 	url := "https://login.vk.ru/?act=get_anonym_token"
@@ -151,50 +151,50 @@ func getCreds(link string) (resUser string, resPass string, resTurn string, resE
 	token1 := resp["data"].(map[string]interface{})["access_token"].(string)
 
 	data = fmt.Sprintf("vk_join_link=https://vk.com/call/join/%s&name=%s&access_token=%s", link, escapedName, token1)
-    reqURL := "https://api.vk.ru/method/calls.getAnonymousToken?v=5.274&client_id=6287487"
+	reqURL := "https://api.vk.ru/method/calls.getAnonymousToken?v=5.274&client_id=6287487"
 
-    var token2 string
-    const maxCaptchaAttempts = 3
-    for attempt := 0; attempt <= maxCaptchaAttempts; attempt++ {
-        resp, err = doRequest(data, reqURL)
-        if err != nil {
-            return "", "", "", fmt.Errorf("request error:%s", err)
-        }
+	var token2 string
+	const maxCaptchaAttempts = 3
+	for attempt := 0; attempt <= maxCaptchaAttempts; attempt++ {
+		resp, err = doRequest(data, reqURL)
+		if err != nil {
+			return "", "", "", fmt.Errorf("request error:%s", err)
+		}
 
-        if errObj, hasErr := resp["error"].(map[string]interface{}); hasErr {
-            errCode, _ := errObj["error_code"].(float64)
-            if errCode == 14 {
-                if attempt == maxCaptchaAttempts {
-                    return "", "", "", fmt.Errorf("captcha failed after %d attempts", maxCaptchaAttempts)
-                }
+		if errObj, hasErr := resp["error"].(map[string]interface{}); hasErr {
+			errCode, _ := errObj["error_code"].(float64)
+			if errCode == 14 {
+				if attempt == maxCaptchaAttempts {
+					return "", "", "", fmt.Errorf("captcha failed after %d attempts", maxCaptchaAttempts)
+				}
 
-                captchaErr := ParseVkCaptchaError(errObj)
-                if captchaErr.IsCaptchaError() {
-                    log.Printf("[Captcha] Attempt %d/%d: solving...", attempt+1, maxCaptchaAttempts)
+				captchaErr := ParseVkCaptchaError(errObj)
+				if captchaErr.IsCaptchaError() {
+					log.Printf("[Captcha] Attempt %d/%d: solving...", attempt+1, maxCaptchaAttempts)
 
-                    successToken, solveErr := solveVkCaptcha(context.Background(), captchaErr)
-                    if solveErr != nil {
-                        return "", "", "", fmt.Errorf("captcha solve error: %v", solveErr)
-                    }
+					successToken, solveErr := solveVkCaptcha(context.Background(), captchaErr)
+					if solveErr != nil {
+						return "", "", "", fmt.Errorf("captcha solve error: %v", solveErr)
+					}
 
-                    if captchaErr.CaptchaAttempt == "0" || captchaErr.CaptchaAttempt == "" {
-                        captchaErr.CaptchaAttempt = "1"
-                    }
+					if captchaErr.CaptchaAttempt == "0" || captchaErr.CaptchaAttempt == "" {
+						captchaErr.CaptchaAttempt = "1"
+					}
 
-                    data = fmt.Sprintf("vk_join_link=https://vk.com/call/join/%s&name=%s"+
-                        "&captcha_key=&captcha_sid=%s&is_sound_captcha=0&success_token=%s"+
-                        "&captcha_ts=%s&captcha_attempt=%s&access_token=%s",
-                        link, escapedName, captchaErr.CaptchaSid, successToken,
-                        captchaErr.CaptchaTs, captchaErr.CaptchaAttempt, token1)
-                    continue
-                }
-            }
-            return "", "", "", fmt.Errorf("VK API error: %v", errObj)
-        }
+					data = fmt.Sprintf("vk_join_link=https://vk.com/call/join/%s&name=%s"+
+						"&captcha_key=&captcha_sid=%s&is_sound_captcha=0&success_token=%s"+
+						"&captcha_ts=%s&captcha_attempt=%s&access_token=%s",
+						link, escapedName, captchaErr.CaptchaSid, successToken,
+						captchaErr.CaptchaTs, captchaErr.CaptchaAttempt, token1)
+					continue
+				}
+			}
+			return "", "", "", fmt.Errorf("VK API error: %v", errObj)
+		}
 
-        token2 = resp["response"].(map[string]interface{})["token"].(string)
-        break
-    }
+		token2 = resp["response"].(map[string]interface{})["token"].(string)
+		break
+	}
 
 	data = fmt.Sprintf("%s%s%s", "session_data=%7B%22version%22%3A2%2C%22device_id%22%3A%22", uuid.New(), "%22%2C%22client_version%22%3A1.1%2C%22client_type%22%3A%22SDK_JS%22%7D&method=auth.anonymLogin&format=JSON&application_key=CGMMEJLGDIHBABABA")
 	url = "https://calls.okcdn.ru/fb.do"
@@ -225,135 +225,138 @@ func getCreds(link string) (resUser string, resPass string, resTurn string, resE
 }
 
 func dtlsFunc(ctx context.Context, conn net.PacketConn, peer *net.UDPAddr) (net.Conn, error) {
-    certificate, err := selfsign.GenerateSelfSigned()
-    if err != nil {
-        return nil, err
-    }
-    config := &dtls.Config{
-        Certificates:          []tls.Certificate{certificate},
-        InsecureSkipVerify:    true,
-        ExtendedMasterSecret:  dtls.RequireExtendedMasterSecret,
-        CipherSuites:          []dtls.CipherSuiteID{dtls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256},
-        ConnectionIDGenerator: dtls.OnlySendCIDGenerator(),
-    }
-    ctx1, cancel := context.WithTimeout(ctx, 30*time.Second)
-    defer cancel()
-    dtlsConn, err := dtls.Client(conn, peer, config)
-    if err != nil {
-        return nil, err
-    }
+	certificate, err := selfsign.GenerateSelfSigned()
+	if err != nil {
+		return nil, err
+	}
+	config := &dtls.Config{
+		Certificates:          []tls.Certificate{certificate},
+		InsecureSkipVerify:    true,
+		ExtendedMasterSecret:  dtls.RequireExtendedMasterSecret,
+		CipherSuites:          []dtls.CipherSuiteID{dtls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256},
+		ConnectionIDGenerator: dtls.OnlySendCIDGenerator(),
+	}
+	ctx1, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	dtlsConn, err := dtls.Client(conn, peer, config)
+	if err != nil {
+		return nil, err
+	}
 
-    if err := dtlsConn.HandshakeContext(ctx1); err != nil {
-        return nil, err
-    }
-    return dtlsConn, nil
+	if err := dtlsConn.HandshakeContext(ctx1); err != nil {
+		return nil, err
+	}
+	return dtlsConn, nil
 }
 
 func oneDtlsConnection(ctx context.Context, peer *net.UDPAddr, listenConn net.PacketConn, connchan chan<- net.PacketConn, okchan chan<- struct{}, c1 chan<- error) {
-    var err error = nil
-    defer func() { c1 <- err }()
-    dtlsctx, dtlscancel := context.WithCancel(ctx)
-    defer dtlscancel()
-    var conn1, conn2 net.PacketConn
-    conn1, conn2 = connutil.AsyncPacketPipe()
-    go func() {
-        for {
-            select {
-            case <-dtlsctx.Done():
-                return
-            case connchan <- conn2:
-            }
-        }
-    }()
-    dtlsConn, err1 := dtlsFunc(dtlsctx, conn1, peer)
-    if err1 != nil {
-        err = fmt.Errorf("failed to connect DTLS: %s", err1)
-        return
-    }
-    defer func() {
-        if closeErr := dtlsConn.Close(); closeErr != nil {
-            err = fmt.Errorf("failed to close DTLS connection: %s", closeErr)
-            return
-        }
-        log.Printf("Closed DTLS connection\n")
-    }()
-    log.Printf("Established DTLS connection!\n")
-    select { case proxyReady <- struct{}{}: default: }
-    go func() {
-        for {
-            select {
-            case <-dtlsctx.Done():
-                return
-            case okchan <- struct{}{}:
-            }
-        }
-    }()
+	var err error = nil
+	defer func() { c1 <- err }()
+	dtlsctx, dtlscancel := context.WithCancel(ctx)
+	defer dtlscancel()
+	var conn1, conn2 net.PacketConn
+	conn1, conn2 = connutil.AsyncPacketPipe()
+	go func() {
+		for {
+			select {
+			case <-dtlsctx.Done():
+				return
+			case connchan <- conn2:
+			}
+		}
+	}()
+	dtlsConn, err1 := dtlsFunc(dtlsctx, conn1, peer)
+	if err1 != nil {
+		err = fmt.Errorf("failed to connect DTLS: %s", err1)
+		return
+	}
+	defer func() {
+		if closeErr := dtlsConn.Close(); closeErr != nil {
+			err = fmt.Errorf("failed to close DTLS connection: %s", closeErr)
+			return
+		}
+		log.Printf("Closed DTLS connection\n")
+	}()
+	log.Printf("Established DTLS connection!\n")
+	select {
+	case proxyReady <- struct{}{}:
+	default:
+	}
+	go func() {
+		for {
+			select {
+			case <-dtlsctx.Done():
+				return
+			case okchan <- struct{}{}:
+			}
+		}
+	}()
 
-    wg := sync.WaitGroup{}
-    wg.Add(2)
-    context.AfterFunc(dtlsctx, func() {
-        listenConn.SetDeadline(time.Now())
-        dtlsConn.SetDeadline(time.Now())
-    })
-    var addr atomic.Value
-    go func() {
-        defer wg.Done()
-        defer dtlscancel()
-        buf := make([]byte, 1600)
-        for {
-            select {
-            case <-dtlsctx.Done():
-                return
-            default:
-            }
-            n, addr1, err1 := listenConn.ReadFrom(buf)
-            if err1 != nil {
-                log.Printf("Failed: %s", err1)
-                return
-            }
+	wg := sync.WaitGroup{}
+	wg.Add(2)
+	context.AfterFunc(dtlsctx, func() {
+		listenConn.SetDeadline(time.Now())
+		dtlsConn.SetDeadline(time.Now())
+	})
+	var addr atomic.Value
+	go func() {
+		defer wg.Done()
+		defer dtlscancel()
+		buf := make([]byte, 1600)
+		for {
+			select {
+			case <-dtlsctx.Done():
+				return
+			default:
+			}
+			n, addr1, err1 := listenConn.ReadFrom(buf)
+			if err1 != nil {
+				log.Printf("Failed: %s", err1)
+				return
+			}
 
-            addr.Store(addr1)
+			addr.Store(addr1)
 
-            _, err1 = dtlsConn.Write(buf[:n])
-            if err1 != nil {
-                log.Printf("Failed: %s", err1)
-                return
-            }
-        }
-    }()
+			_, err1 = dtlsConn.Write(buf[:n])
+			if err1 != nil {
+				log.Printf("Failed: %s", err1)
+				return
+			}
+		}
+	}()
 
-    go func() {
-        defer wg.Done()
-        defer dtlscancel()
-        buf := make([]byte, 1600)
-        for {
-            select {
-            case <-dtlsctx.Done():
-                return
-            default:
-            }
-            n, err1 := dtlsConn.Read(buf)
-            if err1 != nil {
-                log.Printf("Failed: %s", err1)
-                return
-            }
-            addr1, ok := addr.Load().(net.Addr)
-            if !ok {
-                log.Printf("Failed: no listener ip")
-                return
-            }
+	go func() {
+		defer wg.Done()
+		defer dtlscancel()
+		buf := make([]byte, 1600)
+		for {
+			select {
+			case <-dtlsctx.Done():
+				return
+			default:
+			}
+			n, err1 := dtlsConn.Read(buf)
+			if err1 != nil {
+				log.Printf("Failed: %s", err1)
+				return
+			}
+			addr1, ok := addr.Load().(net.Addr)
+			if !ok {
+				log.Printf("Failed: no listener ip")
+				return
+			}
 
-            _, err1 = listenConn.WriteTo(buf[:n], addr1)
-            if err1 != nil {
-                log.Printf("Failed: %s", err1)
-                return
-            }
-        }
-    }()
+			_, err1 = listenConn.WriteTo(buf[:n], addr1)
+			if err1 != nil {
+				log.Printf("Failed: %s", err1)
+				return
+			}
+		}
+	}()
 
-    wg.Wait()
-    listenConn.SetDeadline(time.Time{})
-    dtlsConn.SetDeadline(time.Time{})
+	wg.Wait()
+	listenConn.SetDeadline(time.Time{})
+	dtlsConn.SetDeadline(time.Time{})
 }
 
 type connectedUDPConn struct {
@@ -365,11 +368,12 @@ func (c *connectedUDPConn) WriteTo(p []byte, _ net.Addr) (int, error) {
 }
 
 type turnParams struct {
-	host     string
-	port     string
-	link     string
-	udp      bool
-	getCreds getCredsFunc
+	host       string
+	port       string
+	link       string
+	udp        bool
+	getCreds   getCredsFunc
+	onAllocate func(context.Context, string) error
 }
 
 func oneTurnConnection(ctx context.Context, turnParams *turnParams, peer *net.UDPAddr, conn2 net.PacketConn, c chan<- error) {
@@ -482,6 +486,12 @@ func oneTurnConnection(ctx context.Context, turnParams *turnParams, peer *net.UD
 	// The relayConn's local address is actually the transport
 	// address assigned on the TURN server.
 	log.Printf("relayed-address=%s", relayConn.LocalAddr().String())
+	if turnParams.onAllocate != nil {
+		if err1 := turnParams.onAllocate(ctx, relayConn.LocalAddr().String()); err1 != nil {
+			err = fmt.Errorf("failed to signal allocated relay: %s", err1)
+			return
+		}
+	}
 
 	wg := sync.WaitGroup{}
 	wg.Add(2)
@@ -649,61 +659,100 @@ func poolCreds(f getCredsFunc, poolSize int) getCredsFunc {
 
 //export StartProxy
 func StartProxy(cLink *C.char, cPeerAddr *C.char, cLocalAddr *C.char, cN C.int) {
-    select { case <-proxyReady: default: }
-
-    link := C.GoString(cLink)
-    peerAddrStr := C.GoString(cPeerAddr)
-    localAddrStr := C.GoString(cLocalAddr)
-    
-    host := ""
-    port := "19302"
-    n := int(cN)
-    udp := true
-
-    ctx, cancel := context.WithCancel(context.Background())
-    proxyCancel = cancel
-    defer cancel()
-
-    peer, err := net.ResolveUDPAddr("udp", peerAddrStr)
-    if err != nil {
-        log.Printf("Resolve UDP error: %v", err)
-        return
-    }
-
-    // Detect provider from link
-    isWB := strings.Contains(link, "wb") || strings.Contains(link, "wildberries") || strings.Contains(link, "stream.wb")
-
-    var credFunc getCredsFunc
-    if isWB {
-        log.Printf("Using WB (Wildberries) TURN provider")
-        credFunc = getCredsWB
-        link = "" // WB creates its own rooms, no link needed
-        port = "" // WB: use port from TURN server response (3478), don't override
-    } else {
-        log.Printf("Using VK TURN provider")
-        credFunc = getCreds
-        parts := strings.Split(link, "join/")
-        link = parts[len(parts)-1]
-        if idx := strings.IndexAny(link, "/?#"); idx != -1 {
-            link = link[:idx]
-        }
-    }
-
-	params := &turnParams{
-		host:     host,
-		port:     port,
-		link:     link,
-		udp:      udp,
-		getCreds: poolCreds(credFunc, n),
+	select {
+	case <-proxyReady:
+	default:
 	}
 
-    listenConnChan := make(chan net.PacketConn)
+	link := C.GoString(cLink)
+	peerAddrStr := C.GoString(cPeerAddr)
+	localAddrStr := C.GoString(cLocalAddr)
+
+	host := ""
+	port := "19302"
+	n := int(cN)
+	udp := true
+
+	ctx, cancel := context.WithCancel(context.Background())
+	proxyCancel = cancel
+	defer cancel()
+
+	// Detect provider from link
+	isWB := strings.Contains(link, "wb") || strings.Contains(link, "wildberries") || strings.Contains(link, "stream.wb")
+	isJazz := isJazzSignalingLink(link)
+
+	var credFunc getCredsFunc
+	var peer *net.UDPAddr
+	var err error
+	var onAllocate func(context.Context, string) error
+	if isWB {
+		log.Printf("Using WB (Wildberries) TURN provider")
+		credFunc = getCredsWB
+		link = "" // WB creates its own rooms, no link needed
+		port = "" // WB: use port from TURN server response (3478), don't override
+		peer, err = net.ResolveUDPAddr("udp", peerAddrStr)
+		if err != nil {
+			log.Printf("Resolve UDP error: %v", err)
+			return
+		}
+	} else if isJazz {
+		log.Printf("Using Jazz signaling provider")
+		session, err1 := fetchJazzSession(ctx, link)
+		if err1 != nil {
+			log.Printf("Failed to fetch Jazz session: %v", err1)
+			return
+		}
+
+		peer, err = net.ResolveUDPAddr("udp", session.RelayAddr)
+		if err != nil {
+			log.Printf("Resolve Jazz relay error: %v", err)
+			return
+		}
+
+		turnAddr := session.TurnServer
+		credFunc = func(string) (string, string, string, error) {
+			return session.Username, session.Password, turnAddr, nil
+		}
+		onAllocate = func(ctx context.Context, relayAddr string) error {
+			log.Printf("Jazz client relay allocated: %s", relayAddr)
+			return signalJazzConnect(ctx, link, relayAddr)
+		}
+
+		if n > 1 {
+			log.Printf("Jazz mode currently supports a single active TURN path, forcing n=1 (was %d)", n)
+			n = 1
+		}
+	} else {
+		log.Printf("Using VK TURN provider")
+		credFunc = getCreds
+		peer, err = net.ResolveUDPAddr("udp", peerAddrStr)
+		if err != nil {
+			log.Printf("Resolve UDP error: %v", err)
+			return
+		}
+		parts := strings.Split(link, "join/")
+		link = parts[len(parts)-1]
+		if idx := strings.IndexAny(link, "/?#"); idx != -1 {
+			link = link[:idx]
+		}
+	}
+
+	params := &turnParams{
+		host:       host,
+		port:       port,
+		link:       link,
+		udp:        udp,
+		getCreds:   poolCreds(credFunc, n),
+		onAllocate: onAllocate,
+	}
+
+	listenConnChan := make(chan net.PacketConn)
 	listenConn, err := net.ListenPacket("udp", localAddrStr)
 	if err != nil {
 		log.Printf("Failed to listen: %s", err)
 		return
 	}
-	
+
 	context.AfterFunc(ctx, func() {
 		if closeErr := listenConn.Close(); closeErr != nil {
 			log.Printf("Failed to close local connection: %s", closeErr)
@@ -720,7 +769,7 @@ func StartProxy(cLink *C.char, cPeerAddr *C.char, cLocalAddr *C.char, cN C.int) 
 		}
 	}()
 
-    wg1 := sync.WaitGroup{}
+	wg1 := sync.WaitGroup{}
 	t := time.Tick(200 * time.Millisecond)
 
 	okchan := make(chan struct{})
@@ -733,7 +782,7 @@ func StartProxy(cLink *C.char, cPeerAddr *C.char, cLocalAddr *C.char, cN C.int) 
 		oneTurnConnectionLoop(ctx, params, peer, connchan, t)
 	})
 
-    select {
+	select {
 	case <-okchan:
 	case <-ctx.Done():
 	}
@@ -748,15 +797,15 @@ func StartProxy(cLink *C.char, cPeerAddr *C.char, cLocalAddr *C.char, cN C.int) 
 		})
 	}
 
-    log.Printf("Proxy started on %s", localAddrStr)
-    wg1.Wait()
+	log.Printf("Proxy started on %s", localAddrStr)
+	wg1.Wait()
 }
 
 //export StopProxy
 func StopProxy() {
-    if proxyCancel != nil {
-        proxyCancel()
-        proxyCancel = nil
-        log.Println("Proxy gracefully stopped")
-    }
+	if proxyCancel != nil {
+		proxyCancel()
+		proxyCancel = nil
+		log.Println("Proxy gracefully stopped")
+	}
 }

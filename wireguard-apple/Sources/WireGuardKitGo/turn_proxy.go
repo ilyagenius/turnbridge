@@ -249,7 +249,7 @@ func dtlsFunc(ctx context.Context, conn net.PacketConn, peer *net.UDPAddr) (net.
 	return dtlsConn, nil
 }
 
-func oneDtlsConnection(ctx context.Context, peer *net.UDPAddr, listenConn net.PacketConn, connchan chan<- net.PacketConn, okchan chan<- struct{}, c1 chan<- error) {
+func oneDtlsConnection(ctx context.Context, peer *net.UDPAddr, listenConn net.PacketConn, connchan chan<- net.PacketConn, okchan chan<- struct{}, singleShot bool, c1 chan<- error) {
 	var err error = nil
 	defer func() { c1 <- err }()
 	dtlsctx, dtlscancel := context.WithCancel(ctx)
@@ -257,6 +257,14 @@ func oneDtlsConnection(ctx context.Context, peer *net.UDPAddr, listenConn net.Pa
 	var conn1, conn2 net.PacketConn
 	conn1, conn2 = connutil.AsyncPacketPipe()
 	go func() {
+		if singleShot {
+			select {
+			case <-dtlsctx.Done():
+				return
+			case connchan <- conn2:
+				return
+			}
+		}
 		for {
 			select {
 			case <-dtlsctx.Done():
@@ -374,6 +382,7 @@ type turnParams struct {
 	udp        bool
 	getCreds   getCredsFunc
 	onAllocate func(context.Context, string) error
+	singleShot bool
 }
 
 func oneTurnConnection(ctx context.Context, turnParams *turnParams, peer *net.UDPAddr, conn2 net.PacketConn, c chan<- error) {
@@ -571,14 +580,14 @@ func oneTurnConnection(ctx context.Context, turnParams *turnParams, peer *net.UD
 	}
 }
 
-func oneDtlsConnectionLoop(ctx context.Context, peer *net.UDPAddr, listenConnChan <-chan net.PacketConn, connchan chan<- net.PacketConn, okchan chan<- struct{}) {
+func oneDtlsConnectionLoop(ctx context.Context, peer *net.UDPAddr, listenConnChan <-chan net.PacketConn, connchan chan<- net.PacketConn, okchan chan<- struct{}, singleShot bool) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case listenConn := <-listenConnChan:
 			c := make(chan error)
-			go oneDtlsConnection(ctx, peer, listenConn, connchan, okchan, c)
+			go oneDtlsConnection(ctx, peer, listenConn, connchan, okchan, singleShot, c)
 			if err := <-c; err != nil {
 				log.Printf("%s", err)
 			}
@@ -745,6 +754,7 @@ func StartProxy(cLink *C.char, cPeerAddr *C.char, cLocalAddr *C.char, cN C.int) 
 		udp:        udp,
 		getCreds:   poolCreds(credFunc, n),
 		onAllocate: onAllocate,
+		singleShot: isJazz,
 	}
 
 	listenConnChan := make(chan net.PacketConn)
@@ -777,7 +787,7 @@ func StartProxy(cLink *C.char, cPeerAddr *C.char, cLocalAddr *C.char, cN C.int) 
 	connchan := make(chan net.PacketConn)
 
 	wg1.Go(func() {
-		oneDtlsConnectionLoop(ctx, peer, listenConnChan, connchan, okchan)
+		oneDtlsConnectionLoop(ctx, peer, listenConnChan, connchan, okchan, params.singleShot)
 	})
 	wg1.Go(func() {
 		oneTurnConnectionLoop(ctx, params, peer, connchan, t)
@@ -791,7 +801,7 @@ func StartProxy(cLink *C.char, cPeerAddr *C.char, cLocalAddr *C.char, cN C.int) 
 	for i := 0; i < n-1; i++ {
 		cChan := make(chan net.PacketConn)
 		wg1.Go(func() {
-			oneDtlsConnectionLoop(ctx, peer, listenConnChan, cChan, nil)
+			oneDtlsConnectionLoop(ctx, peer, listenConnChan, cChan, nil, params.singleShot)
 		})
 		wg1.Go(func() {
 			oneTurnConnectionLoop(ctx, params, peer, cChan, t)

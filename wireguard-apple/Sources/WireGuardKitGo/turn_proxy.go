@@ -48,8 +48,6 @@ func ProxySetLogger(context unsafe.Pointer, loggerFn C.proxy_logger_fn_t) {
 	proxyLoggerFunc = loggerFn
 }
 
-var proxyReady = make(chan struct{}, 1)
-
 //export ProxyWaitReady
 func ProxyWaitReady(timeoutMs C.int) C.int {
 	select {
@@ -714,33 +712,11 @@ func StartProxy(cLink *C.char, cPeerAddr *C.char, cLocalAddr *C.char, cN C.int) 
 			return
 		}
 	} else if isJazz {
-		log.Printf("Using Jazz signaling provider")
-		session, err1 := fetchJazzSession(ctx, link)
-		if err1 != nil {
-			log.Printf("Failed to fetch Jazz session: %v", err1)
-			return
+		log.Printf("Using Jazz WebRTC provider")
+		if err := startJazzWebRTCProxy(ctx, link, localAddrStr); err != nil && !errors.Is(err, context.Canceled) {
+			log.Printf("Jazz WebRTC failed: %v", err)
 		}
-
-		peer, err = net.ResolveUDPAddr("udp", session.RelayAddr)
-		if err != nil {
-			log.Printf("Resolve Jazz relay error: %v", err)
-			return
-		}
-
-		turnAddr := session.TurnServer
-		credFunc = func(string) (string, string, string, error) {
-			return session.Username, session.Password, turnAddr, nil
-		}
-		port = "" // Jazz: use the exact port returned by the signaling server (typically 3478)
-		onAllocate = func(ctx context.Context, relayAddr string) error {
-			log.Printf("Jazz client relay allocated: %s", relayAddr)
-			return signalJazzConnect(ctx, link, relayAddr)
-		}
-
-		if n > 1 {
-			log.Printf("Jazz mode currently supports a single active TURN path, forcing n=1 (was %d)", n)
-			n = 1
-		}
+		return
 	} else {
 		log.Printf("Using VK TURN provider")
 		credFunc = getCreds

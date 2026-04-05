@@ -601,6 +601,14 @@ func oneTurnConnectionLoop(ctx context.Context, turnParams *turnParams, peer *ne
 		case <-ctx.Done():
 			return
 		case conn2 := <-connchan:
+			if turnParams.singleShot {
+				c := make(chan error)
+				go oneTurnConnection(ctx, turnParams, peer, conn2, c)
+				if err := <-c; err != nil {
+					log.Printf("%s", err)
+				}
+				continue
+			}
 			select {
 			case <-t:
 				c := make(chan error)
@@ -608,7 +616,8 @@ func oneTurnConnectionLoop(ctx context.Context, turnParams *turnParams, peer *ne
 				if err := <-c; err != nil {
 					log.Printf("%s", err)
 				}
-			default:
+			case <-ctx.Done():
+				return
 			}
 		}
 	}

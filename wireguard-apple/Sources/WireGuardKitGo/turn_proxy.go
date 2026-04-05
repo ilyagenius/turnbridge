@@ -713,6 +713,7 @@ func StartProxy(cLink *C.char, cPeerAddr *C.char, cLocalAddr *C.char, cN C.int) 
 		credFunc = func(string) (string, string, string, error) {
 			return session.Username, session.Password, turnAddr, nil
 		}
+		port = "" // Jazz: use the exact port returned by the signaling server (typically 3478)
 		onAllocate = func(ctx context.Context, relayAddr string) error {
 			log.Printf("Jazz client relay allocated: %s", relayAddr)
 			return signalJazzConnect(ctx, link, relayAddr)

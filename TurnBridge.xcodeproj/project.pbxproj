@@ -142,6 +142,7 @@
 			buildPhases = (
 			);
 			buildToolPath = "$(PROJECT_DIR)/script/build_wireguard_go_bridge.sh";
+			buildWorkingDirectory = "$(PROJECT_DIR)";
 			dependencies = (
 			);
 			name = WireguardGoBridge;

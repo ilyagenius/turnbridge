@@ -1,58 +1,69 @@
 #!/bin/sh
 
-# build_wireguard_go_bridge.sh - Builds WireGuardKitGo
+set -eu
+
+# build_wireguard_go_bridge.sh - Builds WireGuardKitGo for Xcode.
 #
-# Figures out the directory where the wireguard-apple SPM package
-# is checked out by Xcode (so that it works when building as well as
-# archiving), then cd-s to the WireGuardKitGo directory
-# and runs make there.
+# Xcode runs this via the PBXLegacyTarget "WireguardGoBridge". During archive
+# the current working directory and BUILD_DIR layout are not guaranteed, so we
+# resolve paths from PROJECT_DIR first and only then fall back to SourcePackages.
 
-project_data_dir="$BUILD_DIR"
+action="${1:-build}"
+project_dir="${PROJECT_DIR:-$(pwd)}"
 
-# The wireguard-apple README suggests using ${BUILD_DIR%Build/*}, which
-# doesn't seem to work. So here, we do the equivalent in script.
+case "$action" in
+    clean)
+        make_target="clean"
+        ;;
+    build|install|installhdrs|archive)
+        make_target="build"
+        ;;
+    *)
+        make_target="build"
+        ;;
+esac
 
-while true; do
-    parent_dir=$(dirname "$project_data_dir")
-    basename=$(basename "$project_data_dir")
-    project_data_dir="$parent_dir"
-    if [ "$basename" = "Build" ]; then
-        break
+wireguard_go_dir=""
+
+if [ -d "$project_dir/wireguard-apple/Sources/WireGuardKitGo" ]; then
+    echo "Using local wireguard-apple checkout"
+    wireguard_go_dir="$project_dir/wireguard-apple/Sources/WireGuardKitGo"
+elif [ -n "${BUILD_DIR:-}" ]; then
+    search_dir="$BUILD_DIR"
+    while [ "$search_dir" != "/" ] && [ ! -d "$search_dir/SourcePackages/checkouts" ]; do
+        search_dir=$(dirname "$search_dir")
+    done
+
+    if [ -d "$search_dir/SourcePackages/checkouts/wireguard-apple/Sources/WireGuardKitGo" ]; then
+        echo "Using wireguard-apple from SourcePackages/checkouts/wireguard-apple"
+        wireguard_go_dir="$search_dir/SourcePackages/checkouts/wireguard-apple/Sources/WireGuardKitGo"
+    elif [ -d "$search_dir/SourcePackages/checkouts/Sources/WireGuardKitGo" ]; then
+        echo "Using wireguard-apple from SourcePackages/checkouts"
+        wireguard_go_dir="$search_dir/SourcePackages/checkouts/Sources/WireGuardKitGo"
     fi
-done
-
-# The wireguard-apple README looks into
-# SourcePackages/checkouts/wireguard-apple, but Xcode seems to place the
-# sources in SourcePackages/checkouts/ so just playing it safe and
-# trying both.
-
-#checkouts_dir="$project_data_dir"/SourcePackages/checkouts
-#if [ -e "$checkouts_dir"/wireguard-apple ]; then
-#    checkouts_dir="$checkouts_dir"/wireguard-apple
-#fi
-#
-#wireguard_go_dir="$checkouts_dir"/Sources/WireGuardKitGo
-
-LOCAL_WG_DIR="wireguard-apple"
-
-if [ -d "$LOCAL_WG_DIR/Sources/WireGuardKitGo" ]; then
-    echo "🔨 Using LOCAL wireguard-apple"
-    wireguard_go_dir="$LOCAL_WG_DIR/Sources/WireGuardKitGo"
-else
-    echo "📦 Using SPM checkout"
-    checkouts_dir="$project_data_dir"/SourcePackages/checkouts
-    if [ -e "$checkouts_dir"/wireguard-apple ]; then
-        checkouts_dir="$checkouts_dir"/wireguard-apple
-    fi
-    wireguard_go_dir="$checkouts_dir"/Sources/WireGuardKitGo
 fi
 
-# To ensure we have Go in our path, we add where
-# Homebrew generally installs executables
-# export PATH=${PATH}:/opt/homebrew/opt/go@1.16/bin
-export PATH="/opt/homebrew/bin:$PATH"
-# export PATH=${PATH}:/usr/local/go/bin
+if [ -z "$wireguard_go_dir" ]; then
+    echo "error: could not locate Sources/WireGuardKitGo" >&2
+    echo "PROJECT_DIR=$project_dir" >&2
+    echo "BUILD_DIR=${BUILD_DIR:-}" >&2
+    exit 1
+fi
 
-cd "$wireguard_go_dir" && /usr/bin/make
+export PATH="/opt/homebrew/bin:/usr/local/go/bin:/usr/local/bin:$PATH"
 
+if ! command -v go >/dev/null 2>&1; then
+    echo "error: Go toolchain not found in PATH=$PATH" >&2
+    exit 1
+fi
 
+if ! command -v make >/dev/null 2>&1; then
+    echo "error: make not found in PATH=$PATH" >&2
+    exit 1
+fi
+
+echo "WireGuardKitGo dir: $wireguard_go_dir"
+echo "Build action: $action -> make $make_target"
+
+cd "$wireguard_go_dir"
+exec make "$make_target"

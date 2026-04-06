@@ -20,13 +20,6 @@
 			remoteGlobalIDString = A7EBA6432F606A38003CA7F3;
 			remoteInfo = "network-extension";
 		};
-		A7EBA65C2F606C00003CA7F3 /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = A7EBA6242F606924003CA7F3 /* Project object */;
-			proxyType = 1;
-			remoteGlobalIDString = A7EBA6552F606B0F003CA7F3;
-			remoteInfo = WireguardGoBridge;
-		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -134,24 +127,6 @@
 		};
 /* End PBXGroup section */
 
-/* Begin PBXLegacyTarget section */
-		A7EBA6552F606B0F003CA7F3 /* WireguardGoBridge */ = {
-			isa = PBXLegacyTarget;
-			buildArgumentsString = "$(ACTION)";
-			buildConfigurationList = A7EBA6562F606B0F003CA7F3 /* Build configuration list for PBXLegacyTarget "WireguardGoBridge" */;
-			buildPhases = (
-			);
-			buildToolPath = "$(PROJECT_DIR)/script/build_wireguard_go_bridge.sh";
-			buildWorkingDirectory = "$(PROJECT_DIR)";
-			dependencies = (
-			);
-			name = WireguardGoBridge;
-			packageProductDependencies = (
-			);
-			passBuildSettingsInEnvironment = 1;
-			productName = WireguardGoBridge;
-		};
-/* End PBXLegacyTarget section */
 
 /* Begin PBXNativeTarget section */
 		A7EBA62B2F606924003CA7F3 /* TurnBridge */ = {
@@ -218,9 +193,6 @@
 					A7EBA6432F606A38003CA7F3 = {
 						CreatedOnToolsVersion = 26.0.1;
 					};
-					A7EBA6552F606B0F003CA7F3 = {
-						CreatedOnToolsVersion = 26.0.1;
-					};
 				};
 			};
 			buildConfigurationList = A7EBA6272F606924003CA7F3 /* Build configuration list for PBXProject "TurnBridge" */;
@@ -242,7 +214,6 @@
 			targets = (
 				A7EBA62B2F606924003CA7F3 /* TurnBridge */,
 				A7EBA6432F606A38003CA7F3 /* network-extension */,
-				A7EBA6552F606B0F003CA7F3 /* WireguardGoBridge */,
 			);
 		};
 /* End PBXProject section */
@@ -311,11 +282,6 @@
 			isa = PBXTargetDependency;
 			target = A7EBA6432F606A38003CA7F3 /* network-extension */;
 			targetProxy = A7EBA64D2F606A38003CA7F3 /* PBXContainerItemProxy */;
-		};
-		A7EBA65D2F606C00003CA7F3 /* PBXTargetDependency */ = {
-			isa = PBXTargetDependency;
-			target = A7EBA6552F606B0F003CA7F3 /* WireguardGoBridge */;
-			targetProxy = A7EBA65C2F606C00003CA7F3 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -567,31 +533,6 @@
 			};
 			name = Release;
 		};
-		A7EBA6572F606B0F003CA7F3 /* Debug */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				CODE_SIGN_STYLE = Automatic;
-				DEBUGGING_SYMBOLS = YES;
-				DEBUG_INFORMATION_FORMAT = dwarf;
-				GCC_GENERATE_DEBUGGING_SYMBOLS = YES;
-				GCC_OPTIMIZATION_LEVEL = 0;
-				OTHER_CFLAGS = "";
-				OTHER_LDFLAGS = "";
-				PRODUCT_NAME = "$(TARGET_NAME)";
-			};
-			name = Debug;
-		};
-		A7EBA6582F606B0F003CA7F3 /* Release */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				CODE_SIGN_STYLE = Automatic;
-				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
-				OTHER_CFLAGS = "";
-				OTHER_LDFLAGS = "";
-				PRODUCT_NAME = "$(TARGET_NAME)";
-			};
-			name = Release;
-		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -618,15 +559,6 @@
 			buildConfigurations = (
 				A7EBA6512F606A38003CA7F3 /* Debug */,
 				A7EBA6522F606A38003CA7F3 /* Release */,
-			);
-			defaultConfigurationIsVisible = 0;
-			defaultConfigurationName = Release;
-		};
-		A7EBA6562F606B0F003CA7F3 /* Build configuration list for PBXLegacyTarget "WireguardGoBridge" */ = {
-			isa = XCConfigurationList;
-			buildConfigurations = (
-				A7EBA6572F606B0F003CA7F3 /* Debug */,
-				A7EBA6582F606B0F003CA7F3 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

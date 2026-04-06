@@ -92,6 +92,8 @@ TurnBridge uses a specific JSON structure encoded in Base64 for fast configurati
 
 You can use the included `quick_link.py` script to easily generate valid `turnbridge://` clipboard links.
 
+For Jazz mode, set `turn` to the link printed by `jazz-turn-proxy`, for example `https://salutejazz.ru/call/ROOM_ID/PASSWORD`.
+
 1. Open `quick_link.py` in your text editor and replace the placeholder values in the `config` dictionary with your actual server parameters and WireGuard keys.
 2. Run the script from your terminal:
    ```bash

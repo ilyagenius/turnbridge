@@ -740,7 +740,6 @@ func StartProxy(cLink *C.char, cPeerAddr *C.char, cLocalAddr *C.char, cN C.int) 
 		udp:        udp,
 		getCreds:   poolCreds(credFunc, n),
 		onAllocate: onAllocate,
-		singleShot: isJazz,
 	}
 
 	listenConnChan := make(chan net.PacketConn)

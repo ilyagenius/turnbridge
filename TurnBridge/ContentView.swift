@@ -264,10 +264,10 @@ struct ContentView: View {
     private func isJazzProfile(_ profile: VPNProfile) -> Bool {
         let link = profile.vkLink.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !link.isEmpty else { return false }
-        if link.contains("vk.com/call/join/") || link.contains("wildberries") || link.contains("stream.wb") {
-            return false
-        }
-        return link.hasPrefix("http://") || link.hasPrefix("https://")
+        return link.hasPrefix("https://salutejazz.ru/call/")
+            || link.hasPrefix("https://jazz.sber.ru/call/")
+            || link.hasPrefix("http://salutejazz.ru/call/")
+            || link.hasPrefix("http://jazz.sber.ru/call/")
     }
 
     private func validateConfig(_ profile: VPNProfile) -> String? {

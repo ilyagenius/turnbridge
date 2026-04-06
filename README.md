@@ -6,6 +6,16 @@ To run the application, you must use a [server](https://github.com/cacggghp/vk-t
 
 The project is based on the repositories listed in the **Acknowledgments** section.
 
+## 🔒 SberJazz / SaluteJazz Mode
+
+TurnBridge supports tunneling WireGuard traffic through **SberJazz (SaluteJazz) WebRTC datachannels** — no direct UDP connection to the server required, works even in heavily filtered networks.
+
+> **Access is currently restricted.**
+> The server-side component for Jazz mode is not publicly available due to ongoing blocks in Russia.
+> To get access, contact: **[@ilkl34](https://t.me/ilkl34)** on Telegram.
+
+---
+
 ## ✨ Features
 
 * **Custom Routing:** Route your traffic through specific TURN protocols and WG endpoints.

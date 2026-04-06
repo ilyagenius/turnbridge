@@ -11,8 +11,8 @@ The project is based on the repositories listed in the **Acknowledgments** secti
 TurnBridge supports tunneling WireGuard traffic through **SberJazz (SaluteJazz) WebRTC datachannels** — no direct UDP connection to the server required, works even in heavily filtered networks.
 
 > **Access is currently restricted.**
-> The server-side component for Jazz mode is not publicly available due to ongoing blocks in Russia.
-> To get access, contact: **[@ilkl34](https://t.me/ilkl34)** on Telegram.
+> The server-side component and the required client modules for Jazz mode are not publicly available due to ongoing blocks in Russia.
+> To get access to the server binary and additional modules, contact: **[@ilkl34](https://t.me/ilkl34)** on Telegram.
 
 ---
 

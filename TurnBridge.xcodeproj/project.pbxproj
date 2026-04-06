@@ -182,6 +182,7 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = A7EBA6542F606A38003CA7F3 /* Build configuration list for PBXNativeTarget "network-extension" */;
 			buildPhases = (
+				A7EBA6602F606D00003CA7F3 /* Build WireGuard Go Bridge */,
 				A7EBA6402F606A38003CA7F3 /* Sources */,
 				A7EBA6412F606A38003CA7F3 /* Frameworks */,
 				A7EBA6422F606A38003CA7F3 /* Resources */,
@@ -189,7 +190,6 @@
 			buildRules = (
 			);
 			dependencies = (
-				A7EBA65D2F606C00003CA7F3 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				A7EBA6482F606A38003CA7F3 /* network-extension */,
@@ -263,6 +263,31 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		A7EBA6602F606D00003CA7F3 /* Build WireGuard Go Bridge */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Build WireGuard Go Bridge";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(PROJECT_DIR)/wireguard-apple/Sources/WireGuardKitGo/out/libwg-go.a",
+				"$(PROJECT_DIR)/wireguard-apple/Sources/WireGuardKitGo/out/wireguard-go-version.h",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "\"$PROJECT_DIR/script/build_wireguard_go_bridge.sh\" \"$ACTION\"";
+			showEnvVarsInLog = 0;
+		};
+/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		A7EBA6282F606924003CA7F3 /* Sources */ = {

@@ -721,9 +721,14 @@ struct ContentView: View {
             || link.hasPrefix("http://salutejazz.ru/call/") || link.hasPrefix("http://jazz.sber.ru/call/")
     }
 
+    private func isTelemostProfile(_ profile: VPNProfile) -> Bool {
+        let link = profile.vkLink.trimmingCharacters(in: .whitespacesAndNewlines)
+        return link.hasPrefix("https://telemost.yandex.ru/j/") || link.hasPrefix("http://telemost.yandex.ru/j/")
+    }
+
     private func validateConfig(_ profile: VPNProfile) -> String? {
         if profile.vkLink.isEmpty { return "Please provide a valid TURN Server URL." }
-        if profile.peerAddr.isEmpty && !isJazzProfile(profile) { return "Please provide a valid Peer Address." }
+        if profile.peerAddr.isEmpty && !isJazzProfile(profile) && !isTelemostProfile(profile) { return "Please provide a valid Peer Address." }
         if profile.listenAddr.isEmpty { return "Please provide a valid Listen Address." }
         if profile.wgQuickConfig.isEmpty { return "Please provide a valid WireGuard configuration." }
         return nil

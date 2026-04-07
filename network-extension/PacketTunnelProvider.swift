@@ -18,6 +18,15 @@ private let goProxyCLoggerCallback: @convention(c) (UnsafeMutableRawPointer?, In
     guard let cStr = messageCStr else { return }
     let message = String(cString: cStr).trimmingCharacters(in: .newlines)
 
+    // Detect tunnel transport layer connected
+    if message.contains("Established DTLS connection") || message.contains("Established Jazz WebRTC data channel") {
+        if let groupID = SharedLogger.appGroupID,
+           let defaults = UserDefaults(suiteName: groupID) {
+            defaults.set(true, forKey: "tb_dtls_connected")
+            defaults.synchronize()
+        }
+    }
+
     if level == 1 {
         sharedLogger.error("[TP]: \(message, privacy: .public)")
         SharedLogger.error(message, source: .tunnel)
@@ -120,6 +129,12 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         StopProxy()
         SharedLogger.info("TURN proxy stopped", source: .tunnel)
 
+        if let groupID = SharedLogger.appGroupID,
+           let defaults = UserDefaults(suiteName: groupID) {
+            defaults.set(false, forKey: "tb_dtls_connected")
+            defaults.synchronize()
+        }
+
         adapter.stop { [weak self] error in
             guard self != nil else { return }
             if let error = error {
@@ -140,8 +155,35 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     
 
     override func handleAppMessage(_ messageData: Data, completionHandler: ((Data?) -> Void)?) {
-        if let handler = completionHandler {
-            handler(messageData)
+        guard let message = String(data: messageData, encoding: .utf8), message == "stats" else {
+            completionHandler?(messageData)
+            return
+        }
+        adapter.getRuntimeConfiguration { configStr in
+            var lastHandshakeSec: TimeInterval = 0
+            var txBytes: Int64 = 0
+            var rxBytes: Int64 = 0
+            if let config = configStr {
+                for line in config.components(separatedBy: "\n") {
+                    if line.hasPrefix("last_handshake_time_sec="),
+                       let val = TimeInterval(line.dropFirst("last_handshake_time_sec=".count)), val > 0 {
+                        lastHandshakeSec = max(lastHandshakeSec, val)
+                    } else if line.hasPrefix("tx_bytes="),
+                              let val = Int64(line.dropFirst("tx_bytes=".count)) {
+                        txBytes += val
+                    } else if line.hasPrefix("rx_bytes="),
+                              let val = Int64(line.dropFirst("rx_bytes=".count)) {
+                        rxBytes += val
+                    }
+                }
+            }
+            let stats: [String: Any] = [
+                "lastHandshake": lastHandshakeSec,
+                "txBytes": txBytes,
+                "rxBytes": rxBytes
+            ]
+            let data = try? JSONSerialization.data(withJSONObject: stats)
+            completionHandler?(data)
         }
     }
 

@@ -17,63 +17,53 @@ class ConnectionTimer: ObservableObject {
     private var startDate: Date?
 
     func start() {
-        startDate = Date()
-        elapsed = 0
-        timer?.invalidate()
+        startDate = Date(); elapsed = 0; timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-            guard let self, let start = self.startDate else { return }
-            self.elapsed = Date().timeIntervalSince(start)
+            guard let self, let s = self.startDate else { return }
+            self.elapsed = Date().timeIntervalSince(s)
         }
     }
-
-    func stop() {
-        timer?.invalidate()
-        timer = nil
-        startDate = nil
-        elapsed = 0
-    }
+    func stop() { timer?.invalidate(); timer = nil; startDate = nil; elapsed = 0 }
 
     var formatted: String {
-        let h = Int(elapsed) / 3600
-        let m = (Int(elapsed) % 3600) / 60
-        let s = Int(elapsed) % 60
-        if h > 0 { return String(format: "%d:%02d:%02d", h, m, s) }
-        return String(format: "%02d:%02d", m, s)
+        let h = Int(elapsed) / 3600, m = (Int(elapsed) % 3600) / 60, s = Int(elapsed) % 60
+        return h > 0 ? String(format: "%d:%02d:%02d", h, m, s) : String(format: "%02d:%02d", m, s)
     }
 }
 
-// MARK: - Provider Detection
+// MARK: - Tunnel Stats
+
+struct TunnelStats {
+    var lastHandshake: Date? = nil
+    var txBytes: Int64 = 0
+    var rxBytes: Int64 = 0
+    var dtlsConnected: Bool = false
+
+    var handshakeLabel: String {
+        guard let d = lastHandshake else { return "—" }
+        let ago = Int(Date().timeIntervalSince(d))
+        if ago < 60 { return "\(ago)s ago" }
+        if ago < 3600 { return "\(ago/60)m ago" }
+        return "\(ago/3600)h ago"
+    }
+
+    static func formatBytes(_ bytes: Int64) -> String {
+        let kb = Double(bytes) / 1024
+        if kb < 1 { return "—" }
+        if kb < 1024 { return String(format: "%.0f KB", kb) }
+        let mb = kb / 1024
+        if mb < 1024 { return String(format: "%.1f MB", mb) }
+        return String(format: "%.2f GB", mb / 1024)
+    }
+}
+
+// MARK: - Provider
 
 enum TunnelProvider {
     case jazz, vk, wb, unknown
-
-    var label: String {
-        switch self {
-        case .jazz:    return "Jazz"
-        case .vk:      return "VK"
-        case .wb:      return "WB"
-        case .unknown: return "—"
-        }
-    }
-
-    var icon: String {
-        switch self {
-        case .jazz:    return "waveform"
-        case .vk:      return "bubble.left.and.bubble.right"
-        case .wb:      return "shippingbox"
-        case .unknown: return "questionmark.circle"
-        }
-    }
-
-    var color: Color {
-        switch self {
-        case .jazz:    return .purple
-        case .vk:      return .blue
-        case .wb:      return Color(red: 0.9, green: 0.3, blue: 0.1)
-        case .unknown: return .secondary
-        }
-    }
-
+    var label: String { switch self { case .jazz: return "Jazz"; case .vk: return "VK"; case .wb: return "WB"; case .unknown: return "—" } }
+    var icon: String { switch self { case .jazz: return "waveform"; case .vk: return "bubble.left.and.bubble.right"; case .wb: return "shippingbox"; case .unknown: return "questionmark.circle" } }
+    var color: Color { switch self { case .jazz: return .purple; case .vk: return .blue; case .wb: return Color(red:0.9,green:0.3,blue:0.1); case .unknown: return .secondary } }
     static func detect(from link: String) -> TunnelProvider {
         let l = link.lowercased()
         if l.contains("salutejazz") || l.contains("jazz.sber") { return .jazz }
@@ -90,25 +80,25 @@ struct StatCard: View {
     let label: String
     let value: String
     let color: Color
+    let theme: AppTheme
 
     var body: some View {
         VStack(spacing: 6) {
             Image(systemName: icon)
-                .font(.system(size: 18, weight: .semibold))
+                .font(.system(size: 16, weight: .semibold))
                 .foregroundColor(color)
+                .shadow(color: theme.isCyber ? color.opacity(0.8) : .clear, radius: 6)
             Text(value)
-                .font(.system(size: 15, weight: .bold, design: .monospaced))
-                .foregroundColor(.primary)
-                .lineLimit(1)
-                .minimumScaleFactor(0.7)
+                .font(.system(size: 13, weight: .bold, design: .monospaced))
+                .foregroundColor(theme.isCyber ? .white : .primary)
+                .lineLimit(1).minimumScaleFactor(0.6)
             Text(label)
-                .font(.system(size: 11, weight: .medium))
+                .font(.system(size: 10, weight: .medium))
                 .foregroundColor(.secondary)
         }
         .frame(maxWidth: .infinity)
-        .padding(.vertical, 14)
-        .background(.ultraThinMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 16))
+        .padding(.vertical, 12)
+        .themedCard(theme, accent: color)
     }
 }
 
@@ -116,82 +106,64 @@ struct StatCard: View {
 
 struct ConnectionOrb: View {
     let status: NEVPNStatus
-
+    let theme: AppTheme
     @State private var pulse = false
     @State private var rotation: Double = 0
 
     private var mainColor: Color {
         switch status {
-        case .connected:                return .green
+        case .connected: return theme.connectedColor
         case .connecting, .reasserting: return .orange
-        case .disconnecting:            return .red.opacity(0.8)
-        default:                        return Color(.systemGray3)
+        case .disconnecting: return .red.opacity(0.8)
+        default: return theme.isCyber ? Color(red:0.2,green:0.2,blue:0.4) : Color(.systemGray3)
         }
-    }
-
-    private var isAnimating: Bool {
-        status == .connecting || status == .reasserting
     }
 
     var body: some View {
         ZStack {
-            // Outer pulse ring (connected only)
             if status == .connected {
+                // Outer pulse
                 Circle()
-                    .stroke(mainColor.opacity(pulse ? 0 : 0.4), lineWidth: pulse ? 1 : 8)
-                    .frame(width: pulse ? 180 : 140)
-                    .animation(.easeOut(duration: 2).repeatForever(autoreverses: false), value: pulse)
+                    .stroke(mainColor.opacity(pulse ? 0 : 0.5), lineWidth: pulse ? 1 : 10)
+                    .frame(width: pulse ? 190 : 140)
+                    .animation(.easeOut(duration: 2.5).repeatForever(autoreverses: false), value: pulse)
+                // Second pulse (cyber extra ring)
+                if theme.isCyber {
+                    Circle()
+                        .stroke(theme.secondaryAccent.opacity(pulse ? 0 : 0.3), lineWidth: pulse ? 1 : 6)
+                        .frame(width: pulse ? 210 : 155)
+                        .animation(.easeOut(duration: 2.5).repeatForever(autoreverses: false).delay(0.5), value: pulse)
+                }
             }
-
-            // Spinning arc (connecting)
-            if isAnimating {
+            if status == .connecting || status == .reasserting {
                 Circle()
                     .trim(from: 0, to: 0.7)
-                    .stroke(
-                        AngularGradient(colors: [mainColor, mainColor.opacity(0)], center: .center),
-                        style: StrokeStyle(lineWidth: 4, lineCap: .round)
-                    )
-                    .frame(width: 150)
+                    .stroke(AngularGradient(colors: [mainColor, mainColor.opacity(0)], center: .center),
+                            style: StrokeStyle(lineWidth: 3, lineCap: .round))
+                    .frame(width: 152)
                     .rotationEffect(.degrees(rotation))
                     .animation(.linear(duration: 1).repeatForever(autoreverses: false), value: rotation)
             }
-
             // Main orb
             Circle()
-                .fill(
-                    RadialGradient(
-                        colors: [mainColor.opacity(0.25), mainColor.opacity(0.05)],
-                        center: .center,
-                        startRadius: 10,
-                        endRadius: 65
-                    )
-                )
+                .fill(RadialGradient(colors: [mainColor.opacity(0.22), mainColor.opacity(0.04)],
+                                     center: .center, startRadius: 8, endRadius: 65))
                 .frame(width: 130)
-                .overlay(
-                    Circle()
-                        .stroke(mainColor.opacity(0.5), lineWidth: 1.5)
-                        .frame(width: 130)
-                )
+                .overlay(Circle().stroke(mainColor.opacity(theme.isCyber ? 0.8 : 0.4), lineWidth: theme.isCyber ? 1.5 : 1).frame(width: 130))
+                .shadow(color: theme.isCyber ? mainColor.opacity(0.6) : mainColor.opacity(0.2),
+                        radius: theme.isCyber ? 24 : 8)
 
             Image(systemName: status == .connected ? "lock.shield.fill" : "lock.shield")
-                .font(.system(size: 48, weight: .medium))
-                .foregroundStyle(
-                    LinearGradient(
-                        colors: [mainColor, mainColor.opacity(0.7)],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    )
-                )
-                .shadow(color: mainColor.opacity(0.5), radius: 12)
-                .scaleEffect(isAnimating ? 0.95 : 1.0)
-                .animation(isAnimating ? .easeInOut(duration: 0.8).repeatForever() : .default, value: isAnimating)
+                .font(.system(size: 46, weight: .medium))
+                .foregroundStyle(LinearGradient(colors: [mainColor, mainColor.opacity(0.7)], startPoint: .top, endPoint: .bottom))
+                .shadow(color: mainColor.opacity(theme.isCyber ? 0.9 : 0.3), radius: theme.isCyber ? 16 : 6)
+                .scaleEffect((status == .connecting || status == .reasserting) ? 0.95 : 1.0)
+                .animation(.easeInOut(duration: 0.8).repeatForever().delay(0), value: status == .connecting)
         }
-        .frame(width: 180, height: 180)
+        .frame(width: 190, height: 190)
         .onAppear {
             pulse = true
-            withAnimation(.linear(duration: 1).repeatForever(autoreverses: false)) {
-                rotation = 360
-            }
+            withAnimation(.linear(duration: 1).repeatForever(autoreverses: false)) { rotation = 360 }
         }
     }
 }
@@ -202,6 +174,7 @@ struct ProfileRow: View {
     let profile: VPNProfile
     let isSelected: Bool
     let isConnected: Bool
+    let theme: AppTheme
     let onTap: () -> Void
     let onEdit: () -> Void
     let onDelete: () -> Void
@@ -211,59 +184,74 @@ struct ProfileRow: View {
 
     var body: some View {
         HStack(spacing: 14) {
-            // Provider badge
             ZStack {
                 RoundedRectangle(cornerRadius: 10)
                     .fill(provider.color.opacity(0.15))
-                    .frame(width: 42, height: 42)
+                    .frame(width: 40, height: 40)
+                    .shadow(color: theme.isCyber ? provider.color.opacity(0.4) : .clear, radius: 8)
                 Image(systemName: provider.icon)
-                    .font(.system(size: 16, weight: .semibold))
+                    .font(.system(size: 15, weight: .semibold))
                     .foregroundColor(provider.color)
             }
-
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: 2) {
                 Text(profile.name)
                     .font(.system(size: 15, weight: .semibold))
-                    .foregroundColor(.primary)
+                    .foregroundColor(theme.isCyber ? .white : .primary)
                 Text(provider.label + " · " + shortAddr(profile))
-                    .font(.system(size: 12, weight: .regular))
+                    .font(.system(size: 12))
                     .foregroundColor(.secondary)
             }
-
             Spacer()
-
             if isSelected {
                 Image(systemName: "checkmark.circle.fill")
-                    .foregroundColor(.blue)
-                    .font(.system(size: 18))
+                    .foregroundColor(theme.accent)
+                    .shadow(color: theme.isCyber ? theme.accent.opacity(0.7) : .clear, radius: 6)
             }
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
-        .background(isSelected ? Color.blue.opacity(0.08) : Color.clear)
+        .padding(.horizontal, 16).padding(.vertical, 12)
+        .background(isSelected ? theme.accent.opacity(0.08) : Color.clear)
         .contentShape(Rectangle())
         .onTapGesture { if !isConnected { onTap() } }
         .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-            Button(role: .destructive, action: onDelete) {
-                Label("Delete", systemImage: "trash")
-            }
+            Button(role: .destructive, action: onDelete) { Label("Delete", systemImage: "trash") }
             if !isConnected {
-                Button(action: onEdit) {
-                    Label("Edit", systemImage: "pencil")
-                }
-                .tint(.orange)
-                Button(action: onPasteConfig) {
-                    Label("Paste Config", systemImage: "doc.on.clipboard")
-                }
-                .tint(.blue)
+                Button(action: onEdit) { Label("Edit", systemImage: "pencil") }.tint(.orange)
+                Button(action: onPasteConfig) { Label("Paste Config", systemImage: "doc.on.clipboard") }.tint(.blue)
             }
         }
     }
 
     private func shortAddr(_ p: VPNProfile) -> String {
         if p.peerAddr.isEmpty { return "Auto" }
-        let host = p.peerAddr.components(separatedBy: ":").first ?? p.peerAddr
-        return host.count > 20 ? String(host.prefix(18)) + "…" : host
+        let h = p.peerAddr.components(separatedBy: ":").first ?? p.peerAddr
+        return h.count > 18 ? String(h.prefix(16)) + "…" : h
+    }
+}
+
+// MARK: - Theme Picker
+
+struct ThemePicker: View {
+    @Binding var theme: AppTheme
+
+    var body: some View {
+        HStack(spacing: 8) {
+            ForEach(AppTheme.allCases, id: \.rawValue) { t in
+                Button(action: { withAnimation(.spring(response: 0.3)) { theme = t } }) {
+                    HStack(spacing: 5) {
+                        Image(systemName: t.icon).font(.system(size: 11, weight: .semibold))
+                        Text(t.displayName).font(.system(size: 12, weight: .semibold))
+                    }
+                    .padding(.horizontal, 12).padding(.vertical, 7)
+                    .background(theme == t ? Color.primary.opacity(0.15) : Color.clear)
+                    .clipShape(Capsule())
+                    .overlay(Capsule().stroke(theme == t ? Color.primary.opacity(0.4) : Color.clear, lineWidth: 1))
+                    .foregroundColor(theme == t ? .primary : .secondary)
+                }
+            }
+        }
+        .padding(4)
+        .background(.ultraThinMaterial)
+        .clipShape(Capsule())
     }
 }
 
@@ -276,8 +264,13 @@ struct ContentView: View {
     @StateObject private var store = ProfileStore()
     @StateObject private var connTimer = ConnectionTimer()
 
+    @AppStorage("appTheme") private var rawTheme: String = AppTheme.system.rawValue
+    private var theme: AppTheme { AppTheme(rawValue: rawTheme) ?? .system }
+
+    @State private var stats = TunnelStats()
+    @State private var statsTimer: Timer? = nil
+
     @State private var showImportModal = false
-    @State private var showProfileList = false
     @State private var showingAlert = false
     @State private var alertTitle = ""
     @State private var alertMessage = ""
@@ -290,180 +283,171 @@ struct ContentView: View {
 
     var body: some View {
         NavigationStack {
-            ZStack(alignment: .bottom) {
+            ZStack {
                 // Background
-                Color(.systemGroupedBackground)
-                    .ignoresSafeArea()
+                theme.pageBackground.ignoresSafeArea()
+                if theme.isCyber { CyberGrid() }
 
-                ScrollView {
-                    VStack(spacing: 24) {
-
-                        // ── Status Hero ──────────────────────────────
-                        VStack(spacing: 16) {
-                            ConnectionOrb(status: vpnStatus)
-                                .padding(.top, 8)
-
-                            VStack(spacing: 4) {
-                                Text(statusTitle)
-                                    .font(.system(size: 22, weight: .bold))
-                                    .foregroundColor(.primary)
-                                    .animation(.none, value: vpnStatus)
-
-                                Text(statusSubtitle)
-                                    .font(.system(size: 14, weight: .medium))
-                                    .foregroundColor(.secondary)
-                                    .animation(.none, value: vpnStatus)
+                ZStack(alignment: .bottom) {
+                    ScrollView {
+                        VStack(spacing: 20) {
+                            // ── Status Hero ──────────────────────────
+                            VStack(spacing: 14) {
+                                ConnectionOrb(status: vpnStatus, theme: theme)
+                                    .padding(.top, 6)
+                                VStack(spacing: 4) {
+                                    Text(statusTitle)
+                                        .font(.system(size: 22, weight: .bold))
+                                        .foregroundColor(theme.isCyber ? .white : .primary)
+                                        .shadow(color: theme.isCyber ? statusColor.opacity(0.6) : .clear, radius: 8)
+                                    Text(statusSubtitle)
+                                        .font(.system(size: 14, weight: .medium))
+                                        .foregroundColor(.secondary)
+                                }
                             }
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 20)
-                        .background(.regularMaterial)
-                        .clipShape(RoundedRectangle(cornerRadius: 24))
-                        .padding(.horizontal, 16)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 20)
+                            .themedCard(theme, accent: statusColor, cornerRadius: 24)
+                            .padding(.horizontal, 16)
 
-                        // ── Stats Row ────────────────────────────────
-                        HStack(spacing: 10) {
-                            StatCard(
-                                icon: selectedProvider.icon,
-                                label: "Protocol",
-                                value: selectedProvider.label,
-                                color: selectedProvider.color
-                            )
-                            StatCard(
-                                icon: "timer",
-                                label: "Uptime",
-                                value: vpnStatus == .connected ? connTimer.formatted : "—",
-                                color: .green
-                            )
-                            StatCard(
-                                icon: "server.rack",
-                                label: "Profile",
-                                value: store.selectedProfile?.name ?? "None",
-                                color: .blue
-                            )
-                        }
-                        .padding(.horizontal, 16)
-
-                        // ── Profile List ─────────────────────────────
-                        VStack(spacing: 0) {
-                            HStack {
-                                Text("Profiles")
-                                    .font(.system(size: 13, weight: .semibold))
-                                    .foregroundColor(.secondary)
-                                    .textCase(.uppercase)
-                                Spacer()
+                            // ── Stats Grid ───────────────────────────
+                            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
+                                StatCard(icon: selectedProvider.icon, label: "Protocol",
+                                         value: selectedProvider.label, color: selectedProvider.color, theme: theme)
+                                StatCard(icon: "timer", label: "Uptime",
+                                         value: vpnStatus == .connected ? connTimer.formatted : "—",
+                                         color: theme.connectedColor, theme: theme)
+                                StatCard(
+                                    icon: stats.dtlsConnected ? "lock.shield.fill" : "lock.shield",
+                                    label: "Tunnel",
+                                    value: stats.dtlsConnected ? "Active" : "—",
+                                    color: stats.dtlsConnected ? theme.connectedColor : .secondary,
+                                    theme: theme
+                                )
+                                StatCard(
+                                    icon: "clock.arrow.circlepath",
+                                    label: "Handshake",
+                                    value: vpnStatus == .connected ? stats.handshakeLabel : "—",
+                                    color: theme.accent,
+                                    theme: theme
+                                )
                             }
-                            .padding(.horizontal, 20)
-                            .padding(.bottom, 8)
+                            .padding(.horizontal, 16)
 
+                            // ── Traffic Row ──────────────────────────
+                            if vpnStatus == .connected && (stats.txBytes > 0 || stats.rxBytes > 0) {
+                                HStack(spacing: 10) {
+                                    StatCard(icon: "arrow.up.circle.fill", label: "Upload",
+                                             value: TunnelStats.formatBytes(stats.txBytes),
+                                             color: .orange, theme: theme)
+                                    StatCard(icon: "arrow.down.circle.fill", label: "Download",
+                                             value: TunnelStats.formatBytes(stats.rxBytes),
+                                             color: .cyan, theme: theme)
+                                }
+                                .padding(.horizontal, 16)
+                                .transition(.opacity.combined(with: .move(edge: .top)))
+                            }
+
+                            // ── Profiles ─────────────────────────────
                             VStack(spacing: 0) {
-                                if store.profiles.isEmpty {
-                                    HStack {
-                                        Spacer()
+                                HStack {
+                                    Text("Profiles")
+                                        .font(.system(size: 12, weight: .semibold))
+                                        .foregroundColor(.secondary)
+                                        .textCase(.uppercase)
+                                    Spacer()
+                                }
+                                .padding(.horizontal, 20).padding(.bottom, 8)
+
+                                VStack(spacing: 0) {
+                                    if store.profiles.isEmpty {
                                         VStack(spacing: 8) {
                                             Image(systemName: "plus.circle.dashed")
-                                                .font(.system(size: 32))
+                                                .font(.system(size: 28))
                                                 .foregroundColor(.secondary)
                                             Text("No profiles yet")
-                                                .font(.system(size: 14))
+                                                .font(.system(size: 13))
                                                 .foregroundColor(.secondary)
                                         }
-                                        .padding(.vertical, 32)
-                                        Spacer()
-                                    }
-                                    .background(.regularMaterial)
-                                    .clipShape(RoundedRectangle(cornerRadius: 16))
-                                } else {
-                                    ForEach(Array(store.profiles.enumerated()), id: \.element.id) { idx, profile in
-                                        ProfileRow(
-                                            profile: profile,
-                                            isSelected: profile.id == store.selectedProfileID,
-                                            isConnected: vpnStatus != .disconnected,
-                                            onTap: {
-                                                withAnimation(.spring(response: 0.3)) {
-                                                    store.selectedProfileID = profile.id
-                                                    store.save()
-                                                }
-                                            },
-                                            onEdit: {
-                                                settingsSheet = SettingsSheet(profileID: profile.id, isNew: false)
-                                            },
-                                            onDelete: {
-                                                withAnimation {
-                                                    store.deleteProfile(profile.id)
-                                                }
-                                            },
-                                            onPasteConfig: {
-                                                pasteConfigIntoProfile(profile)
+                                        .frame(maxWidth: .infinity).padding(.vertical, 28)
+                                        .themedCard(theme)
+                                    } else {
+                                        ForEach(Array(store.profiles.enumerated()), id: \.element.id) { idx, profile in
+                                            ProfileRow(
+                                                profile: profile,
+                                                isSelected: profile.id == store.selectedProfileID,
+                                                isConnected: vpnStatus != .disconnected,
+                                                theme: theme,
+                                                onTap: {
+                                                    withAnimation(.spring(response: 0.3)) {
+                                                        store.selectedProfileID = profile.id; store.save()
+                                                    }
+                                                },
+                                                onEdit: { settingsSheet = SettingsSheet(profileID: profile.id, isNew: false) },
+                                                onDelete: { withAnimation { store.deleteProfile(profile.id) } },
+                                                onPasteConfig: { pasteConfigIntoProfile(profile) }
+                                            )
+                                            if idx < store.profiles.count - 1 {
+                                                Divider().padding(.leading, 70)
                                             }
-                                        )
-
-                                        if idx < store.profiles.count - 1 {
-                                            Divider()
-                                                .padding(.leading, 72)
                                         }
                                     }
                                 }
+                                .themedCard(theme, cornerRadius: 16)
+                                .padding(.horizontal, 16)
                             }
-                            .background(.regularMaterial)
-                            .clipShape(RoundedRectangle(cornerRadius: 16))
-                            .padding(.horizontal, 16)
-                        }
 
-                        // Bottom padding for button
-                        Color.clear.frame(height: 90)
-                    }
-                    .padding(.top, 8)
-                }
-
-                // ── Connect Button ───────────────────────────────────
-                VStack(spacing: 0) {
-                    LinearGradient(
-                        colors: [Color(.systemGroupedBackground).opacity(0), Color(.systemGroupedBackground)],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    )
-                    .frame(height: 20)
-
-                    Button(action: toggleTunnel) {
-                        HStack(spacing: 10) {
-                            if vpnStatus == .connecting || vpnStatus == .disconnecting {
-                                ProgressView()
-                                    .progressViewStyle(CircularProgressViewStyle(tint: .white))
-                                    .scaleEffect(0.85)
-                            } else {
-                                Image(systemName: vpnStatus == .connected ? "stop.circle.fill" : "play.circle.fill")
-                                    .font(.system(size: 20))
+                            // ── Theme Picker ─────────────────────────
+                            HStack {
+                                Spacer()
+                                ThemePicker(theme: Binding(
+                                    get: { theme },
+                                    set: { rawTheme = $0.rawValue }
+                                ))
+                                Spacer()
                             }
-                            Text(buttonText)
-                                .font(.system(size: 17, weight: .semibold))
+                            .padding(.top, 4)
+
+                            Color.clear.frame(height: 90)
                         }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 17)
-                        .background(
-                            LinearGradient(
-                                colors: buttonGradient,
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        )
-                        .foregroundColor(.white)
-                        .clipShape(RoundedRectangle(cornerRadius: 18))
-                        .shadow(color: buttonGradient.first?.opacity(0.4) ?? .clear, radius: 12, x: 0, y: 6)
+                        .padding(.top, 8)
                     }
-                    .disabled(vpnStatus == .connecting || vpnStatus == .disconnecting || store.selectedProfile == nil)
-                    .padding(.horizontal, 16)
-                    .padding(.bottom, 32)
-                    .background(Color(.systemGroupedBackground))
+
+                    // ── Connect Button ────────────────────────────
+                    VStack(spacing: 0) {
+                        LinearGradient(colors: [theme.pageBackground.opacity(0), theme.pageBackground],
+                                       startPoint: .top, endPoint: .bottom)
+                        .frame(height: 24)
+
+                        Button(action: toggleTunnel) {
+                            HStack(spacing: 10) {
+                                if vpnStatus == .connecting || vpnStatus == .disconnecting {
+                                    ProgressView().progressViewStyle(CircularProgressViewStyle(tint: .white)).scaleEffect(0.85)
+                                } else {
+                                    Image(systemName: vpnStatus == .connected ? "stop.circle.fill" : "play.circle.fill")
+                                        .font(.system(size: 19))
+                                        .shadow(color: theme.isCyber ? .white.opacity(0.5) : .clear, radius: 6)
+                                }
+                                Text(buttonText).font(.system(size: 17, weight: .semibold))
+                            }
+                            .frame(maxWidth: .infinity).padding(.vertical, 17)
+                            .background(LinearGradient(colors: buttonGradient, startPoint: .topLeading, endPoint: .bottomTrailing))
+                            .foregroundColor(.white)
+                            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                            .shadow(color: (buttonGradient.first ?? .clear).opacity(theme.isCyber ? 0.6 : 0.3),
+                                    radius: theme.isCyber ? 18 : 10, x: 0, y: 6)
+                        }
+                        .disabled(vpnStatus == .connecting || vpnStatus == .disconnecting || store.selectedProfile == nil)
+                        .padding(.horizontal, 16).padding(.bottom, 32)
+                        .background(theme.pageBackground)
+                    }
                 }
             }
-            .overlay {
-                if showImportModal {
-                    importModalView
-                }
-            }
+            .overlay { if showImportModal { importModalView } }
+            .preferredColorScheme(theme.colorScheme)
             .navigationTitle("TurnBridge")
             .navigationBarTitleDisplayMode(.inline)
+            .toolbarBackground(theme == .system ? .automatic : .visible, for: .navigationBar)
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
                     Button(action: {
@@ -473,99 +457,138 @@ struct ContentView: View {
                     }) {
                         Image(systemName: "plus.circle.fill")
                             .font(.system(size: 20))
-                            .foregroundColor(vpnStatus == .disconnected ? .blue : .secondary)
+                            .foregroundColor(vpnStatus == .disconnected ? theme.accent : .secondary)
+                            .shadow(color: theme.isCyber ? theme.accent.opacity(0.6) : .clear, radius: 8)
                     }
                 }
-
-                ToolbarItemGroup(placement: .navigationBarTrailing) {
+                ToolbarItem(placement: .navigationBarTrailing) {
                     NavigationLink(destination: GlobalSettingsView()) {
-                        Image(systemName: "gearshape.fill")
-                            .font(.system(size: 18))
-                            .foregroundColor(.primary)
+                        Image(systemName: "gearshape.fill").font(.system(size: 18))
                     }
                 }
             }
             .sheet(item: $settingsSheet) { sheet in
-                NavigationStack {
-                    SettingsView(store: store, profileID: sheet.profileID, isNewProfile: sheet.isNew)
-                }
+                NavigationStack { SettingsView(store: store, profileID: sheet.profileID, isNewProfile: sheet.isNew) }
             }
             .onAppear(perform: checkInitialStatus)
             .onReceive(NotificationCenter.default.publisher(for: .NEVPNStatusDidChange)) { notification in
-                if let connection = notification.object as? NEVPNConnection {
-                    let newStatus = connection.status
-                    let statusName: String = {
-                        switch newStatus {
-                        case .connected:     return "Connected"
-                        case .connecting:    return "Connecting"
-                        case .disconnected:  return "Disconnected"
-                        case .disconnecting: return "Disconnecting"
-                        case .reasserting:   return "Reasserting"
-                        case .invalid:       return "Invalid"
-                        @unknown default:    return "Unknown"
-                        }
-                    }()
-                    SharedLogger.info("VPN status: \(statusName)")
-                    withAnimation(.spring(response: 0.4)) {
-                        let prev = self.vpnStatus
-                        self.vpnStatus = newStatus
-                        if newStatus == .connected && prev != .connected {
-                            connTimer.start()
-                        } else if newStatus == .disconnected {
-                            connTimer.stop()
-                        }
-                    }
+                if let conn = notification.object as? NEVPNConnection {
+                    handleStatusChange(conn.status)
                 }
             }
             .alert(alertTitle, isPresented: $showingAlert) {
-                Button("OK", role: .cancel) { }
-            } message: {
-                Text(alertMessage)
-            }
+                Button("OK", role: .cancel) {}
+            } message: { Text(alertMessage) }
         }
     }
 
     // MARK: - Computed
 
+    private var statusColor: Color {
+        switch vpnStatus {
+        case .connected: return theme.connectedColor
+        case .connecting, .reasserting: return .orange
+        default: return .secondary
+        }
+    }
+
     private var statusTitle: String {
         switch vpnStatus {
-        case .connected:     return "Connected"
-        case .connecting:    return "Connecting…"
+        case .connected: return "Connected"
+        case .connecting: return "Connecting…"
         case .disconnecting: return "Disconnecting…"
-        case .reasserting:   return "Reconnecting…"
-        default:             return "Disconnected"
+        case .reasserting: return "Reconnecting…"
+        default: return "Disconnected"
         }
     }
 
     private var statusSubtitle: String {
         switch vpnStatus {
-        case .connected:
-            return "Tunnel active via \(selectedProvider.label)"
-        case .connecting:
-            return "Establishing \(selectedProvider.label) tunnel"
-        case .disconnecting:
-            return "Closing tunnel"
-        default:
-            return store.selectedProfile != nil
-                ? "Tap Connect to start"
-                : "Add a profile to get started"
+        case .connected: return "Tunnel active via \(selectedProvider.label)"
+        case .connecting: return "Establishing \(selectedProvider.label) tunnel"
+        case .disconnecting: return "Closing tunnel"
+        default: return store.selectedProfile != nil ? "Tap Connect to start" : "Add a profile to get started"
         }
     }
 
     private var buttonText: String {
         switch vpnStatus {
-        case .connected:     return "Disconnect"
-        case .connecting:    return "Connecting…"
+        case .connected: return "Disconnect"
+        case .connecting: return "Connecting…"
         case .disconnecting: return "Stopping…"
-        default:             return "Connect"
+        default: return "Connect"
         }
     }
 
     private var buttonGradient: [Color] {
         switch vpnStatus {
-        case .connected:                return [Color(red: 0.9, green: 0.2, blue: 0.2), .red]
-        case .connecting, .disconnecting, .reasserting: return [.orange, Color(red: 1, green: 0.6, blue: 0)]
-        default:                        return [.blue, Color(red: 0.1, green: 0.5, blue: 1)]
+        case .connected: return [Color(red:0.9,green:0.15,blue:0.15), .red]
+        case .connecting, .disconnecting, .reasserting: return [.orange, Color(red:1,green:0.6,blue:0)]
+        default:
+            return theme.isCyber
+                ? [theme.accent, theme.secondaryAccent]
+                : [.blue, Color(red:0.1,green:0.5,blue:1)]
+        }
+    }
+
+    // MARK: - Stats
+
+    private func startStatsTimer() {
+        statsTimer?.invalidate()
+        loadStats()
+        statsTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { _ in loadStats() }
+    }
+
+    private func stopStatsTimer() {
+        statsTimer?.invalidate(); statsTimer = nil
+        stats = TunnelStats()
+    }
+
+    private func loadStats() {
+        // DTLS from shared UserDefaults
+        if let groupID = SharedLogger.appGroupID,
+           let defaults = UserDefaults(suiteName: groupID) {
+            stats.dtlsConnected = defaults.bool(forKey: "tb_dtls_connected")
+        }
+        // WG stats via IPC
+        NETunnelProviderManager.loadAllFromPreferences { managers, _ in
+            guard let manager = managers?.first,
+                  let session = manager.connection as? NETunnelProviderSession,
+                  let data = "stats".data(using: .utf8) else { return }
+            try? session.sendProviderMessage(data) { responseData in
+                guard let d = responseData,
+                      let json = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return }
+                DispatchQueue.main.async {
+                    if let ts = json["lastHandshake"] as? TimeInterval, ts > 0 {
+                        self.stats.lastHandshake = Date(timeIntervalSince1970: ts)
+                    }
+                    self.stats.txBytes = (json["txBytes"] as? Int64) ?? (json["txBytes"] as? Int).map { Int64($0) } ?? 0
+                    self.stats.rxBytes = (json["rxBytes"] as? Int64) ?? (json["rxBytes"] as? Int).map { Int64($0) } ?? 0
+                }
+            }
+        }
+    }
+
+    // MARK: - Status handling
+
+    private func handleStatusChange(_ newStatus: NEVPNStatus) {
+        let name: String = {
+            switch newStatus {
+            case .connected: return "Connected"; case .connecting: return "Connecting"
+            case .disconnected: return "Disconnected"; case .disconnecting: return "Disconnecting"
+            case .reasserting: return "Reasserting"; case .invalid: return "Invalid"
+            @unknown default: return "Unknown"
+            }
+        }()
+        SharedLogger.info("VPN status: \(name)")
+        withAnimation(.spring(response: 0.4)) {
+            let prev = self.vpnStatus
+            self.vpnStatus = newStatus
+            if newStatus == .connected && prev != .connected {
+                connTimer.start(); startStatsTimer()
+            } else if newStatus == .disconnected {
+                connTimer.stop(); stopStatsTimer()
+            }
         }
     }
 
@@ -573,79 +596,45 @@ struct ContentView: View {
 
     private var importModalView: some View {
         ZStack {
-            Color.black.opacity(0.4)
-                .ignoresSafeArea()
-                .onTapGesture {
-                    withAnimation(.spring()) { showImportModal = false }
-                }
+            Color.black.opacity(0.45).ignoresSafeArea()
+                .onTapGesture { withAnimation(.spring()) { showImportModal = false } }
 
             VStack(spacing: 0) {
-                // Handle
-                Capsule()
-                    .fill(Color.secondary.opacity(0.4))
-                    .frame(width: 36, height: 4)
-                    .padding(.top, 12)
-                    .padding(.bottom, 20)
-
-                Text("Add Profile")
-                    .font(.system(size: 18, weight: .bold))
-                    .padding(.bottom, 20)
-
-                VStack(spacing: 12) {
-                    importButton(
-                        icon: "doc.on.clipboard.fill",
-                        title: "Paste from Clipboard",
-                        subtitle: "Import a turnbridge:// link",
-                        color: .blue,
-                        action: importFromClipboard
-                    )
-
-                    importButton(
-                        icon: "square.and.pencil",
-                        title: "Create Manually",
-                        subtitle: "Configure a new profile",
-                        color: .green,
-                        action: addManualProfile
-                    )
+                Capsule().fill(Color.secondary.opacity(0.4)).frame(width: 36, height: 4).padding(.top, 12).padding(.bottom, 18)
+                Text("Add Profile").font(.system(size: 18, weight: .bold)).padding(.bottom, 18)
+                VStack(spacing: 10) {
+                    importButton(icon: "doc.on.clipboard.fill", title: "Paste from Clipboard",
+                                 subtitle: "Import a turnbridge:// link", color: theme.accent, action: importFromClipboard)
+                    importButton(icon: "square.and.pencil", title: "Create Manually",
+                                 subtitle: "Configure a new profile", color: .green, action: addManualProfile)
                 }
-                .padding(.horizontal, 20)
-                .padding(.bottom, 24)
+                .padding(.horizontal, 20).padding(.bottom, 24)
             }
             .frame(maxWidth: .infinity)
             .background(.regularMaterial)
             .clipShape(RoundedRectangle(cornerRadius: 28))
-            .padding(.horizontal, 12)
+            .padding(.horizontal, 14)
             .transition(.move(edge: .bottom).combined(with: .opacity))
         }
     }
 
     private func importButton(icon: String, title: String, subtitle: String, color: Color, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            HStack(spacing: 16) {
+            HStack(spacing: 14) {
                 ZStack {
-                    RoundedRectangle(cornerRadius: 12)
-                        .fill(color.opacity(0.15))
-                        .frame(width: 48, height: 48)
-                    Image(systemName: icon)
-                        .font(.system(size: 20, weight: .semibold))
-                        .foregroundColor(color)
+                    RoundedRectangle(cornerRadius: 10).fill(color.opacity(0.15)).frame(width: 44, height: 44)
+                    Image(systemName: icon).font(.system(size: 18, weight: .semibold)).foregroundColor(color)
                 }
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(title)
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundColor(.primary)
-                    Text(subtitle)
-                        .font(.system(size: 12))
-                        .foregroundColor(.secondary)
+                    Text(title).font(.system(size: 14, weight: .semibold)).foregroundColor(.primary)
+                    Text(subtitle).font(.system(size: 12)).foregroundColor(.secondary)
                 }
                 Spacer()
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(.secondary)
+                Image(systemName: "chevron.right").font(.system(size: 12, weight: .semibold)).foregroundColor(.secondary)
             }
-            .padding(14)
+            .padding(12)
             .background(Color(.secondarySystemGroupedBackground))
-            .clipShape(RoundedRectangle(cornerRadius: 16))
+            .clipShape(RoundedRectangle(cornerRadius: 14))
         }
     }
 
@@ -653,91 +642,55 @@ struct ContentView: View {
 
     private func isJazzProfile(_ profile: VPNProfile) -> Bool {
         let link = profile.vkLink.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !link.isEmpty else { return false }
-        return link.hasPrefix("https://salutejazz.ru/call/")
-            || link.hasPrefix("https://jazz.sber.ru/call/")
-            || link.hasPrefix("http://salutejazz.ru/call/")
-            || link.hasPrefix("http://jazz.sber.ru/call/")
+        return link.hasPrefix("https://salutejazz.ru/call/") || link.hasPrefix("https://jazz.sber.ru/call/")
+            || link.hasPrefix("http://salutejazz.ru/call/") || link.hasPrefix("http://jazz.sber.ru/call/")
     }
 
     private func validateConfig(_ profile: VPNProfile) -> String? {
-        if profile.vkLink.isEmpty {
-            return "Please provide a valid TURN Server URL."
-        }
-        if profile.peerAddr.isEmpty && !isJazzProfile(profile) {
-            return "Please provide a valid Peer Address."
-        }
-        if profile.listenAddr.isEmpty {
-            return "Please provide a valid Listen Address."
-        }
-        if profile.wgQuickConfig.isEmpty {
-            return "Please provide a valid WireGuard configuration."
-        }
+        if profile.vkLink.isEmpty { return "Please provide a valid TURN Server URL." }
+        if profile.peerAddr.isEmpty && !isJazzProfile(profile) { return "Please provide a valid Peer Address." }
+        if profile.listenAddr.isEmpty { return "Please provide a valid Listen Address." }
+        if profile.wgQuickConfig.isEmpty { return "Please provide a valid WireGuard configuration." }
         return nil
     }
 
     private func toggleTunnel() {
         if vpnStatus == .connected {
-            SharedLogger.info("User requested disconnect")
-            app.turnOffTunnel()
+            SharedLogger.info("User requested disconnect"); app.turnOffTunnel()
         } else {
             guard let profile = store.selectedProfile else { return }
-            if let errorMessage = validateConfig(profile) {
-                SharedLogger.warning("Config validation failed: \(errorMessage)")
-                showAlert(title: "Configuration Required", message: errorMessage)
-                return
+            if let err = validateConfig(profile) {
+                showAlert(title: "Configuration Required", message: err); return
             }
             SharedLogger.info("User requested connect with profile \"\(profile.name)\"")
             vpnStatus = .connecting
-            app.turnOnTunnel(
-                vkLink: profile.vkLink,
-                peerAddr: profile.peerAddr,
-                listenAddr: profile.listenAddr,
-                nValue: profile.nValue,
-                wgQuickConfig: profile.wgQuickConfig
-            ) { isSuccess in
-                if !isSuccess {
-                    vpnStatus = .disconnected
-                    SharedLogger.error("Tunnel start failed")
-                }
+            app.turnOnTunnel(vkLink: profile.vkLink, peerAddr: profile.peerAddr,
+                             listenAddr: profile.listenAddr, nValue: profile.nValue,
+                             wgQuickConfig: profile.wgQuickConfig) { isSuccess in
+                if !isSuccess { vpnStatus = .disconnected; SharedLogger.error("Tunnel start failed") }
             }
         }
     }
 
     private func checkInitialStatus() {
-        NETunnelProviderManager.loadAllFromPreferences { managers, error in
+        NETunnelProviderManager.loadAllFromPreferences { managers, _ in
             if let manager = managers?.first {
                 self.vpnStatus = manager.connection.status
-                if manager.connection.status == .connected {
-                    connTimer.start()
-                }
-            } else {
-                self.vpnStatus = .disconnected
-            }
+                if manager.connection.status == .connected { connTimer.start(); startStatsTimer() }
+            } else { self.vpnStatus = .disconnected }
         }
     }
 
     private func importFromClipboard() {
-        guard let clipboardString = UIPasteboard.general.string else {
-            SharedLogger.warning("Clipboard import failed: clipboard is empty")
+        guard let str = UIPasteboard.general.string else {
             withAnimation { showImportModal = false }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                showAlert(title: "Error", message: "Clipboard is empty.")
-            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { showAlert(title: "Error", message: "Clipboard is empty.") }
             return
         }
-
-        SharedLogger.debug("Parsing clipboard config (\(clipboardString.count) chars)")
         do {
-            let config = try ConfigParser.parse(from: clipboardString)
-            let profile = VPNProfile(
-                name: config.name ?? "Profile",
-                vkLink: config.turn,
-                peerAddr: config.peer,
-                listenAddr: config.listen,
-                nValue: config.n,
-                wgQuickConfig: config.wg
-            )
+            let config = try ConfigParser.parse(from: str)
+            let profile = VPNProfile(name: config.name ?? "Profile", vkLink: config.turn, peerAddr: config.peer,
+                                     listenAddr: config.listen, nValue: config.n, wgQuickConfig: config.wg)
             store.addProfile(profile)
             SharedLogger.info("Profile \"\(store.selectedProfile?.name ?? "")\" imported from clipboard")
             withAnimation { showImportModal = false }
@@ -745,64 +698,41 @@ struct ContentView: View {
                 showAlert(title: "Success", message: "Profile \"\(store.selectedProfile?.name ?? "")\" imported.")
             }
         } catch {
-            SharedLogger.error("Clipboard import failed: \(error.localizedDescription)")
             withAnimation { showImportModal = false }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                showAlert(title: "Error", message: error.localizedDescription)
-            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { showAlert(title: "Error", message: error.localizedDescription) }
         }
     }
 
     private func pasteConfigIntoProfile(_ existing: VPNProfile) {
-        guard let clipboardString = UIPasteboard.general.string else {
-            showAlert(title: "Error", message: "Clipboard is empty.")
-            return
-        }
+        guard let str = UIPasteboard.general.string else { showAlert(title: "Error", message: "Clipboard is empty."); return }
         do {
-            let config = try ConfigParser.parse(from: clipboardString)
+            let config = try ConfigParser.parse(from: str)
             var updated = existing
-            updated.vkLink       = config.turn
-            updated.peerAddr     = config.peer
-            updated.listenAddr   = config.listen
-            updated.nValue       = config.n
-            updated.wgQuickConfig = config.wg
+            updated.vkLink = config.turn; updated.peerAddr = config.peer
+            updated.listenAddr = config.listen; updated.nValue = config.n; updated.wgQuickConfig = config.wg
             store.updateProfile(updated)
             SharedLogger.info("Profile \"\(existing.name)\" updated from clipboard")
             showAlert(title: "Updated", message: "Profile \"\(existing.name)\" config replaced.")
-        } catch {
-            SharedLogger.error("Paste config failed: \(error.localizedDescription)")
-            showAlert(title: "Error", message: error.localizedDescription)
-        }
+        } catch { showAlert(title: "Error", message: error.localizedDescription) }
     }
 
     private func addManualProfile() {
         withAnimation { showImportModal = false }
         let profile = VPNProfile(name: "Profile")
         store.addProfile(profile)
-        SharedLogger.info("New manual profile created: \"\(store.selectedProfile?.name ?? "")\"")
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
             settingsSheet = SettingsSheet(profileID: profile.id, isNew: true)
         }
     }
 
     private func showAlert(title: String, message: String) {
-        alertTitle = title
-        alertMessage = message
-        showingAlert = true
+        alertTitle = title; alertMessage = message; showingAlert = true
     }
 
     static func isOnWiFi() -> Bool {
-        let monitor = NWPathMonitor()
-        let semaphore = DispatchSemaphore(value: 0)
-        var result = false
-        monitor.pathUpdateHandler = { path in
-            result = path.usesInterfaceType(.wifi)
-            semaphore.signal()
-        }
-        let queue = DispatchQueue(label: "wifi-check")
-        monitor.start(queue: queue)
-        _ = semaphore.wait(timeout: .now() + 1)
-        monitor.cancel()
-        return result
+        let monitor = NWPathMonitor(); let sem = DispatchSemaphore(value: 0); var result = false
+        monitor.pathUpdateHandler = { result = $0.usesInterfaceType(.wifi); sem.signal() }
+        monitor.start(queue: DispatchQueue(label: "wifi-check"))
+        _ = sem.wait(timeout: .now() + 1); monitor.cancel(); return result
     }
 }

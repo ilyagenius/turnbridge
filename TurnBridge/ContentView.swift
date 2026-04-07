@@ -179,6 +179,7 @@ struct ProfileRow: View {
     let onEdit: () -> Void
     let onDelete: () -> Void
     let onPasteConfig: () -> Void
+    // swipeActions applied externally in List
 
     var provider: TunnelProvider { TunnelProvider.detect(from: profile.vkLink) }
 
@@ -212,13 +213,6 @@ struct ProfileRow: View {
         .background(isSelected ? theme.accent.opacity(0.08) : Color.clear)
         .contentShape(Rectangle())
         .onTapGesture { if !isConnected { onTap() } }
-        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-            Button(role: .destructive, action: onDelete) { Label("Delete", systemImage: "trash") }
-            if !isConnected {
-                Button(action: onEdit) { Label("Edit", systemImage: "pencil") }.tint(.orange)
-                Button(action: onPasteConfig) { Label("Paste Config", systemImage: "doc.on.clipboard") }.tint(.blue)
-            }
-        }
     }
 
     private func shortAddr(_ p: VPNProfile) -> String {
@@ -359,20 +353,19 @@ struct ContentView: View {
                                 }
                                 .padding(.horizontal, 20).padding(.bottom, 8)
 
-                                VStack(spacing: 0) {
-                                    if store.profiles.isEmpty {
-                                        VStack(spacing: 8) {
-                                            Image(systemName: "plus.circle.dashed")
-                                                .font(.system(size: 28))
-                                                .foregroundColor(.secondary)
-                                            Text("No profiles yet")
-                                                .font(.system(size: 13))
-                                                .foregroundColor(.secondary)
-                                        }
-                                        .frame(maxWidth: .infinity).padding(.vertical, 28)
-                                        .themedCard(theme)
-                                    } else {
-                                        ForEach(Array(store.profiles.enumerated()), id: \.element.id) { idx, profile in
+                                if store.profiles.isEmpty {
+                                    VStack(spacing: 8) {
+                                        Image(systemName: "plus.circle.dashed")
+                                            .font(.system(size: 28)).foregroundColor(.secondary)
+                                        Text("No profiles yet")
+                                            .font(.system(size: 13)).foregroundColor(.secondary)
+                                    }
+                                    .frame(maxWidth: .infinity).padding(.vertical, 28)
+                                    .themedCard(theme)
+                                    .padding(.horizontal, 16)
+                                } else {
+                                    List {
+                                        ForEach(store.profiles) { profile in
                                             ProfileRow(
                                                 profile: profile,
                                                 isSelected: profile.id == store.selectedProfileID,
@@ -387,14 +380,37 @@ struct ContentView: View {
                                                 onDelete: { withAnimation { store.deleteProfile(profile.id) } },
                                                 onPasteConfig: { pasteConfigIntoProfile(profile) }
                                             )
-                                            if idx < store.profiles.count - 1 {
-                                                Divider().padding(.leading, 70)
+                                            .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                                                Button(role: .destructive) {
+                                                    withAnimation { store.deleteProfile(profile.id) }
+                                                } label: { Label("Delete", systemImage: "trash") }
+                                                if vpnStatus == .disconnected {
+                                                    Button { settingsSheet = SettingsSheet(profileID: profile.id, isNew: false) }
+                                                        label: { Label("Edit", systemImage: "pencil") }
+                                                        .tint(.orange)
+                                                    Button { pasteConfigIntoProfile(profile) }
+                                                        label: { Label("Paste Config", systemImage: "doc.on.clipboard") }
+                                                        .tint(.blue)
+                                                }
                                             }
+                                            .listRowBackground(
+                                                profile.id == store.selectedProfileID
+                                                    ? theme.accent.opacity(0.08)
+                                                    : theme.cardBackground
+                                            )
+                                            .listRowInsets(EdgeInsets())
+                                            .listRowSeparatorTint(Color.primary.opacity(0.08))
                                         }
                                     }
+                                    .listStyle(.plain)
+                                    .scrollDisabled(true)
+                                    .frame(height: CGFloat(store.profiles.count) * 68)
+                                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                                    .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                        .strokeBorder(Color.primary.opacity(theme.cardBorderOpacity), lineWidth: theme.cardBorderWidth))
+                                    .shadow(color: theme.isCyber ? theme.accent.opacity(0.15) : .clear, radius: theme.glowRadius)
+                                    .padding(.horizontal, 16)
                                 }
-                                .themedCard(theme, cornerRadius: 16)
-                                .padding(.horizontal, 16)
                             }
 
                             // ── Theme Picker ─────────────────────────

@@ -1,6 +1,7 @@
 import SwiftUI
 import NetworkExtension
 import Network
+import Combine
 
 struct SettingsSheet: Identifiable {
     let id = UUID()

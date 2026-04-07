@@ -37,4 +37,11 @@ extern void StopProxy(void);
 extern void ProxySetLogger(void *context, logger_fn_t logger_fn);
 extern int ProxyWaitReady(int timeoutMs);
 
+// Captcha WebView fallback.
+// The callback is invoked when automatic PoW fails; redirectUri is the VK captcha page URL.
+typedef void(*proxy_captcha_fn_t)(void *context, const char *redirectUri);
+extern void ProxySetCaptchaHandler(void *context, proxy_captcha_fn_t fn);
+// Call this from Swift with the success_token extracted from the WebView.
+extern void ProxySolveCaptcha(const char *successToken);
+
 #endif

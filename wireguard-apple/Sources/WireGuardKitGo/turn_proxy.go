@@ -10,6 +10,16 @@ static inline void call_proxy_logger(proxy_logger_fn_t fn, void *ctx, int level,
         fn(ctx, level, msg);
     }
 }
+
+// Captcha callback: called when PoW fails and the app must show a WebView.
+// redirectUri is the VK Smart Captcha URL to load in WKWebView.
+typedef void(*proxy_captcha_fn_t)(void *context, const char *redirectUri);
+
+static inline void call_proxy_captcha(proxy_captcha_fn_t fn, void *ctx, const char *redirectUri) {
+    if (fn != NULL) {
+        fn(ctx, redirectUri);
+    }
+}
 */
 import "C"
 
@@ -22,6 +32,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	mathrand "math/rand"
 	"net"
 	"net/http"
 	neturl "net/url"
@@ -43,10 +54,40 @@ var proxyLoggerFunc C.proxy_logger_fn_t
 var proxyLoggerCtx unsafe.Pointer
 var proxyCancel context.CancelFunc
 
+// Captcha WebView fallback — set by the Swift side on startup.
+var proxyCaptchaFunc C.proxy_captcha_fn_t
+var proxyCaptchaCtx unsafe.Pointer
+
+// captchaSolutionCh receives the success_token from ProxySolveCaptcha (Swift → Go).
+// Buffered so Swift can fire-and-forget without blocking.
+var captchaSolutionCh = make(chan string, 1)
+
 //export ProxySetLogger
 func ProxySetLogger(context unsafe.Pointer, loggerFn C.proxy_logger_fn_t) {
 	proxyLoggerCtx = context
 	proxyLoggerFunc = loggerFn
+}
+
+// ProxySetCaptchaHandler registers the Swift callback invoked when the Go proxy
+// exhausts all automatic PoW attempts and needs the user to solve captcha in a WebView.
+//
+//export ProxySetCaptchaHandler
+func ProxySetCaptchaHandler(ctx unsafe.Pointer, fn C.proxy_captcha_fn_t) {
+	proxyCaptchaCtx = ctx
+	proxyCaptchaFunc = fn
+}
+
+// ProxySolveCaptcha is called by Swift after the user solves the captcha in the WebView.
+// successToken is the value extracted from the captcha page (success_token field).
+//
+//export ProxySolveCaptcha
+func ProxySolveCaptcha(cToken *C.char) {
+	token := C.GoString(cToken)
+	// Non-blocking send: if nothing is waiting, the token is dropped (old solve).
+	select {
+	case captchaSolutionCh <- token:
+	default:
+	}
 }
 
 //export ProxyWaitReady
@@ -82,15 +123,56 @@ func init() {
 
 type getCredsFunc func(string) (string, string, string, error)
 
-func getCreds(link string) (resUser string, resPass string, resTurn string, resErr error) {
+// vkCredentialsList contains 5 VK app credential pairs.
+// getCreds shuffles and rotates through them to reduce per-app rate limiting.
+type vkCredentials struct{ id, secret string }
+
+var vkCredentialsList = []vkCredentials{
+	{"6287487", "QbYic1K3lEV5kTGiqlq2"},
+	{"7879029", "aR5NKGmm03GYrCiNKsaw"},
+	{"52461373", "o557NLIkAErNhakXrQ7A"},
+	{"52649896", "WStp4ihWG4l3nmXZgIbC"},
+	{"51781872", "IjjCNl4L4Tf5QZEXIHKK"},
+}
+
+// getCreds tries each VK credential in random order, returning on first success.
+// Non-captcha errors advance to the next credential; captcha errors are retried
+// with fresh PoW attempts before giving up on a credential.
+func getCreds(link string) (string, string, string, error) {
+	creds := make([]vkCredentials, len(vkCredentialsList))
+	copy(creds, vkCredentialsList)
+	mathrand.Shuffle(len(creds), func(i, j int) { creds[i], creds[j] = creds[j], creds[i] })
+
+	var lastErr error
+	for i, vc := range creds {
+		log.Printf("vk: credential %d/%d (client_id=%s)", i+1, len(creds), vc.id)
+		user, pass, addr, err := getVKCredsOnce(link, vc.id, vc.secret)
+		if err == nil {
+			return user, pass, addr, nil
+		}
+		log.Printf("vk: client_id=%s failed: %v", vc.id, err)
+		lastErr = err
+	}
+	return "", "", "", fmt.Errorf("all %d VK credentials failed, last: %w", len(creds), lastErr)
+}
+
+// getVKCredsOnce fetches VK TURN credentials using a single app credential pair.
+// Implements step 1 (anon token) → 1.5 (preview warm-up) → 2 (call token, with
+// up to 3 PoW retries on captcha, each with a fresh captcha session) → 3 (okcdn
+// login) → 4 (join + TURN creds).
+func getVKCredsOnce(link, clientID, clientSecret string) (resUser string, resPass string, resTurn string, resErr error) {
 	profile := getRandomProfile()
 	name := generateName()
 	escapedName := neturl.QueryEscape(name)
 
-	log.Printf("Connecting - Name: %s | UA: %s", name, profile.UserAgent)
+	ua := profile.UserAgent
+	logUA := ua
+	if len(logUA) > 60 {
+		logUA = logUA[:60]
+	}
+	log.Printf("vk: connecting as %q UA=%s...", name, logUA)
 
 	doRequest := func(data string, url string) (resp map[string]interface{}, err error) {
-
 		client := &http.Client{
 			Timeout: 20 * time.Second,
 			Transport: &http.Transport{
@@ -104,8 +186,7 @@ func getCreds(link string) (resUser string, resPass string, resTurn string, resE
 		if err != nil {
 			return nil, err
 		}
-
-		req.Header.Add("User-Agent", profile.UserAgent)
+		req.Header.Add("User-Agent", ua)
 		req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
 
 		httpResp, err := client.Do(req)
@@ -122,102 +203,180 @@ func getCreds(link string) (resUser string, resPass string, resTurn string, resE
 		if err != nil {
 			return nil, err
 		}
-
 		err = json.Unmarshal(body, &resp)
 		if err != nil {
 			return nil, err
 		}
-
 		return resp, nil
 	}
 
 	var resp map[string]interface{}
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("get TURN creds error (bad JSON?): %v\n\n", resp)
-			resErr = fmt.Errorf("panic in getCreds: %v", r)
+			log.Printf("get TURN creds panic (bad JSON?): %v", resp)
+			resErr = fmt.Errorf("panic in getVKCredsOnce: %v", r)
 		}
 	}()
 
-	data := "client_id=6287487&token_type=messages&client_secret=QbYic1K3lEV5kTGiqlq2&version=1&app_id=6287487"
-	url := "https://login.vk.ru/?act=get_anonym_token"
-
-	resp, err := doRequest(data, url)
+	// Step 1: anonymous messages token
+	step1Data := fmt.Sprintf("client_id=%s&token_type=messages&client_secret=%s&version=1&app_id=%s",
+		clientID, clientSecret, clientID)
+	var err error
+	resp, err = doRequest(step1Data, "https://login.vk.ru/?act=get_anonym_token")
 	if err != nil {
-		return "", "", "", fmt.Errorf("request error:%s", err)
+		return "", "", "", fmt.Errorf("step1: %w", err)
 	}
-
 	token1 := resp["data"].(map[string]interface{})["access_token"].(string)
 
-	data = fmt.Sprintf("vk_join_link=https://vk.com/call/join/%s&name=%s&access_token=%s", link, escapedName, token1)
-	reqURL := "https://api.vk.ru/method/calls.getAnonymousToken?v=5.274&client_id=6287487"
+	// Step 1.5: warm up session — matches reference HAR flow, non-fatal
+	previewData := fmt.Sprintf("vk_join_link=https://vk.com/call/join/%s&access_token=%s", link, token1)
+	_, _ = doRequest(previewData, fmt.Sprintf("https://api.vk.ru/method/calls.getCallPreview?v=5.275&client_id=%s", clientID))
 
+	// Step 2: anonymous call token, with PoW captcha retry
+	step2URL := fmt.Sprintf("https://api.vk.ru/method/calls.getAnonymousToken?v=5.275&client_id=%s", clientID)
+	step2Data := fmt.Sprintf("vk_join_link=https://vk.com/call/join/%s&name=%s&access_token=%s",
+		link, escapedName, token1)
+
+	const maxCaptchaRounds = 3
+	const maxPoWRetries = 3
 	var token2 string
-	const maxCaptchaAttempts = 3
-	for attempt := 0; attempt <= maxCaptchaAttempts; attempt++ {
-		resp, err = doRequest(data, reqURL)
+
+	for round := 0; round < maxCaptchaRounds; round++ {
+		resp, err = doRequest(step2Data, step2URL)
 		if err != nil {
-			return "", "", "", fmt.Errorf("request error:%s", err)
+			return "", "", "", fmt.Errorf("step2: %w", err)
 		}
 
-		if errObj, hasErr := resp["error"].(map[string]interface{}); hasErr {
-			errCode, _ := errObj["error_code"].(float64)
-			if errCode == 14 {
-				if attempt == maxCaptchaAttempts {
-					return "", "", "", fmt.Errorf("captcha failed after %d attempts", maxCaptchaAttempts)
-				}
+		errObj, hasErr := resp["error"].(map[string]interface{})
+		if !hasErr {
+			token2 = resp["response"].(map[string]interface{})["token"].(string)
+			break
+		}
 
-				captchaErr := ParseVkCaptchaError(errObj)
-				if captchaErr.IsCaptchaError() {
-					log.Printf("[Captcha] Attempt %d/%d: solving...", attempt+1, maxCaptchaAttempts)
+		errCode, _ := errObj["error_code"].(float64)
+		if int(errCode) != 14 {
+			return "", "", "", fmt.Errorf("vk API error: %v", errObj)
+		}
 
-					successToken, solveErr := solveVkCaptcha(context.Background(), captchaErr)
-					if solveErr != nil {
-						return "", "", "", fmt.Errorf("captcha solve error: %v", solveErr)
+		captchaErr := ParseVkCaptchaError(errObj)
+		if !captchaErr.IsCaptchaError() {
+			return "", "", "", fmt.Errorf("error 14 but no redirect_uri/session_token: %v", errObj)
+		}
+
+		log.Printf("vk: captcha required (round %d/%d)", round+1, maxCaptchaRounds)
+
+		// Up to 3 PoW attempts; on failure fetch a fresh captcha URL and retry.
+		currentCaptcha := captchaErr
+		var powToken string
+		var powErr error
+
+		for powTry := 1; powTry <= maxPoWRetries; powTry++ {
+			log.Printf("vk: PoW attempt %d/%d", powTry, maxPoWRetries)
+			powCtx, powCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			powToken, powErr = solveVkCaptcha(powCtx, currentCaptcha)
+			powCancel()
+			if powErr == nil {
+				break
+			}
+			log.Printf("vk: PoW %d/%d failed: %v", powTry, maxPoWRetries, powErr)
+			if powTry < maxPoWRetries {
+				// Request a fresh captcha session before the next attempt
+				freshData := fmt.Sprintf("vk_join_link=https://vk.com/call/join/%s&name=%s&access_token=%s",
+					link, escapedName, token1)
+				freshResp, freshErr := doRequest(freshData, step2URL)
+				if freshErr == nil {
+					if fe, ok := freshResp["error"].(map[string]interface{}); ok {
+						freshCaptcha := ParseVkCaptchaError(fe)
+						if freshCaptcha.IsCaptchaError() {
+							currentCaptcha = freshCaptcha
+							log.Printf("vk: refreshed captcha for PoW retry %d", powTry+1)
+						}
 					}
-
-					if captchaErr.CaptchaAttempt == "0" || captchaErr.CaptchaAttempt == "" {
-						captchaErr.CaptchaAttempt = "1"
-					}
-
-					data = fmt.Sprintf("vk_join_link=https://vk.com/call/join/%s&name=%s"+
-						"&captcha_key=&captcha_sid=%s&is_sound_captcha=0&success_token=%s"+
-						"&captcha_ts=%s&captcha_attempt=%s&access_token=%s",
-						link, escapedName, captchaErr.CaptchaSid, successToken,
-						captchaErr.CaptchaTs, captchaErr.CaptchaAttempt, token1)
-					continue
 				}
 			}
-			return "", "", "", fmt.Errorf("VK API error: %v", errObj)
 		}
 
-		token2 = resp["response"].(map[string]interface{})["token"].(string)
-		break
+		if powErr != nil {
+			// All automatic PoW attempts failed — fall back to WebView if a handler is set.
+			if proxyCaptchaFunc != nil && currentCaptcha.RedirectUri != "" {
+				log.Printf("vk: PoW exhausted, requesting WebView for %s", currentCaptcha.RedirectUri)
+				cURI := C.CString(currentCaptcha.RedirectUri)
+				C.call_proxy_captcha(proxyCaptchaFunc, proxyCaptchaCtx, cURI)
+				C.free(unsafe.Pointer(cURI))
+
+				// Wait up to 5 minutes for the user to solve captcha in the WebView.
+				webCtx, webCancel := context.WithTimeout(context.Background(), 5*time.Minute)
+				var webViewToken string
+				select {
+				case webViewToken = <-captchaSolutionCh:
+					log.Printf("vk: received WebView token (%d chars)", len(webViewToken))
+				case <-webCtx.Done():
+					webCancel()
+					return "", "", "", fmt.Errorf("captcha: WebView timeout (5 min)")
+				}
+				webCancel()
+
+				if currentCaptcha.CaptchaAttempt == "" || currentCaptcha.CaptchaAttempt == "0" {
+					currentCaptcha.CaptchaAttempt = "1"
+				}
+				step2Data = fmt.Sprintf(
+					"vk_join_link=https://vk.com/call/join/%s&name=%s&access_token=%s"+
+						"&captcha_key=&captcha_sid=%s&is_sound_captcha=0&success_token=%s"+
+						"&captcha_ts=%s&captcha_attempt=%s",
+					link, escapedName, token1,
+					currentCaptcha.CaptchaSid, neturl.QueryEscape(webViewToken),
+					currentCaptcha.CaptchaTs, currentCaptcha.CaptchaAttempt,
+				)
+				continue
+			}
+			return "", "", "", fmt.Errorf("captcha: all %d PoW attempts failed: %w", maxPoWRetries, powErr)
+		}
+
+		if currentCaptcha.CaptchaAttempt == "" || currentCaptcha.CaptchaAttempt == "0" {
+			currentCaptcha.CaptchaAttempt = "1"
+		}
+
+		step2Data = fmt.Sprintf(
+			"vk_join_link=https://vk.com/call/join/%s&name=%s&access_token=%s"+
+				"&captcha_key=&captcha_sid=%s&is_sound_captcha=0&success_token=%s"+
+				"&captcha_ts=%s&captcha_attempt=%s",
+			link, escapedName, token1,
+			currentCaptcha.CaptchaSid, neturl.QueryEscape(powToken),
+			currentCaptcha.CaptchaTs, currentCaptcha.CaptchaAttempt,
+		)
 	}
 
-	data = fmt.Sprintf("%s%s%s", "session_data=%7B%22version%22%3A2%2C%22device_id%22%3A%22", uuid.New(), "%22%2C%22client_version%22%3A1.1%2C%22client_type%22%3A%22SDK_JS%22%7D&method=auth.anonymLogin&format=JSON&application_key=CGMMEJLGDIHBABABA")
-	url = "https://calls.okcdn.ru/fb.do"
+	if token2 == "" {
+		return "", "", "", fmt.Errorf("step2: failed after %d captcha rounds", maxCaptchaRounds)
+	}
 
-	resp, err = doRequest(data, url)
+	// Step 3: OK.ru anonymous login
+	step3Data := fmt.Sprintf("%s%s%s",
+		"session_data=%7B%22version%22%3A2%2C%22device_id%22%3A%22",
+		uuid.New(),
+		"%22%2C%22client_version%22%3A1.1%2C%22client_type%22%3A%22SDK_JS%22%7D&method=auth.anonymLogin&format=JSON&application_key=CGMMEJLGDIHBABABA",
+	)
+	resp, err = doRequest(step3Data, "https://calls.okcdn.ru/fb.do")
 	if err != nil {
-		return "", "", "", fmt.Errorf("request error:%s", err)
+		return "", "", "", fmt.Errorf("step3: %w", err)
 	}
-
 	token3 := resp["session_key"].(string)
 
-	data = fmt.Sprintf("joinLink=%s&isVideo=false&protocolVersion=5&anonymToken=%s&method=vchat.joinConversationByLink&format=JSON&application_key=CGMMEJLGDIHBABABA&session_key=%s", link, token2, token3)
-	url = "https://calls.okcdn.ru/fb.do"
-
-	resp, err = doRequest(data, url)
+	// Step 4: join call and get TURN credentials
+	step4Data := fmt.Sprintf(
+		"joinLink=%s&isVideo=false&protocolVersion=5&anonymToken=%s&method=vchat.joinConversationByLink&format=JSON&application_key=CGMMEJLGDIHBABABA&session_key=%s",
+		link, token2, token3,
+	)
+	resp, err = doRequest(step4Data, "https://calls.okcdn.ru/fb.do")
 	if err != nil {
-		return "", "", "", fmt.Errorf("request error:%s", err)
+		return "", "", "", fmt.Errorf("step4: %w", err)
 	}
 
 	user := resp["turn_server"].(map[string]interface{})["username"].(string)
 	pass := resp["turn_server"].(map[string]interface{})["credential"].(string)
-	turn := resp["turn_server"].(map[string]interface{})["urls"].([]interface{})[0].(string)
+	turnURL := resp["turn_server"].(map[string]interface{})["urls"].([]interface{})[0].(string)
 
-	clean := strings.Split(turn, "?")[0]
+	clean := strings.Split(turnURL, "?")[0]
 	address := strings.TrimPrefix(strings.TrimPrefix(clean, "turn:"), "turns:")
 
 	return user, pass, address, nil

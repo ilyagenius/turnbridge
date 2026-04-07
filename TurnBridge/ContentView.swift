@@ -661,6 +661,8 @@ struct ContentView: View {
             self.vpnStatus = newStatus
             if newStatus == .connected && prev != .connected {
                 connTimer.start(); startStatsTimer()
+            } else if newStatus == .connecting && prev != .connecting {
+                startStatsTimer()
             } else if newStatus == .disconnected {
                 connTimer.stop(); stopStatsTimer()
             }

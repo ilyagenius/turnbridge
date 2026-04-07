@@ -44,6 +44,12 @@ class ProfileStore: ObservableObject {
         save()
     }
 
+    func updateProfile(_ profile: VPNProfile) {
+        guard let idx = profiles.firstIndex(where: { $0.id == profile.id }) else { return }
+        profiles[idx] = profile
+        save()
+    }
+
     func deleteProfile(_ id: UUID) {
         profiles.removeAll { $0.id == id }
         if selectedProfileID == id {

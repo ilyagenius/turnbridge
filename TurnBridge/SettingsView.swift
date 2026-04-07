@@ -22,7 +22,7 @@ struct SettingsView: View {
             }
 
             Section(header: Text("Proxy Settings")) {
-                TextField("TURN Server URL", text: binding(\.vkLink))
+                TextField("Server / Room URL", text: binding(\.vkLink))
                     .autocapitalization(.none)
                     .disableAutocorrection(true)
 

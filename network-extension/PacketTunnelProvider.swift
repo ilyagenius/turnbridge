@@ -33,7 +33,7 @@ private let goProxyCLoggerCallback: @convention(c) (UnsafeMutableRawPointer?, In
     let message = String(cString: cStr).trimmingCharacters(in: .newlines)
 
     // Detect tunnel transport layer connected
-    if message.contains("Established DTLS connection") || message.contains("Established Jazz WebRTC data channel") {
+    if message.contains("Established DTLS connection") || message.contains("Established Jazz WebRTC data channel") || message.contains("Established Telemost WebRTC data channel") {
         if let groupID = SharedLogger.appGroupID,
            let defaults = UserDefaults(suiteName: groupID) {
             defaults.set(true, forKey: "tb_dtls_connected")

@@ -31,12 +31,19 @@ func isTelemostLink(link string) bool {
 	return host == "telemost.yandex.ru" && strings.HasPrefix(parsed.Path, "/j/")
 }
 
+type telemostICEServer struct {
+	URLs       []string `json:"urls"`
+	Username   string   `json:"username"`
+	Credential string   `json:"credential"`
+}
+
 type telemostConnInfo struct {
 	RoomID      string `json:"room_id"`
 	PeerID      string `json:"peer_id"`
 	Credentials string `json:"credentials"`
 	ClientConfig struct {
-		MediaServerURL string `json:"media_server_url"`
+		MediaServerURL string               `json:"media_server_url"`
+		ICEServers     []telemostICEServer  `json:"ice_servers"`
 	} `json:"client_configuration"`
 }
 
@@ -82,6 +89,23 @@ func fetchTelemostConnectionInfo(roomURL, displayName string) (*telemostConnInfo
 	return &info, nil
 }
 
+func telemostICEConfig(conn *telemostConnInfo) []webrtc.ICEServer {
+	servers := []webrtc.ICEServer{
+		{URLs: []string{"stun:stun.rtc.yandex.net:3478"}},
+	}
+	for _, s := range conn.ClientConfig.ICEServers {
+		servers = append(servers, webrtc.ICEServer{
+			URLs:       s.URLs,
+			Username:   s.Username,
+			Credential: s.Credential,
+		})
+	}
+	if len(conn.ClientConfig.ICEServers) > 0 {
+		log.Printf("Telemost ICE servers from API: %d", len(conn.ClientConfig.ICEServers))
+	}
+	return servers
+}
+
 func startTelemostWebRTCProxy(ctx context.Context, roomURL string, localAddrStr string) error {
 	participantName := fmt.Sprintf("turnbridge-ios-%d", time.Now().UnixNano()%100000)
 
@@ -120,9 +144,7 @@ func startTelemostWebRTCProxy(ctx context.Context, roomURL string, localAddrStr 
 	}
 
 	pcConfig := webrtc.Configuration{
-		ICEServers: []webrtc.ICEServer{
-			{URLs: []string{"stun:stun.rtc.yandex.net:3478"}},
-		},
+		ICEServers: telemostICEConfig(conn),
 	}
 
 	pcSub, err := webrtc.NewPeerConnection(pcConfig)

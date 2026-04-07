@@ -43,7 +43,7 @@ Set `turn` to a VK call join link and `peer` to your VPS address with vk-turn-pr
 * **Redesigned UI:** Live connection uptime timer, per-provider color badges, swipe-to-delete profiles, animated connection orb.
 
 ## 📸 Screenshot
-![Main Screen](screen.png)
+![Main Screen](IMG_1662.jpeg)
 
 ## 🚀 Installation & Build
 

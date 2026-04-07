@@ -15,8 +15,17 @@ Tunnels WireGuard through **SberJazz WebRTC datachannels** — traffic looks lik
 
 Set `turn` to the Jazz room link printed by `jazz-turn-proxy`, e.g. `https://salutejazz.ru/call/ROOM_ID/PASSWORD`. Leave `peer` empty — the server-side proxy already knows the WireGuard endpoint.
 
-> **Server component required.**
+> **Access restricted**
 > Due to ongoing blocking in Russia, the `jazz-turn-proxy` server binary is distributed privately for a small fee.
+> Contact **[@ilkl34](https://t.me/ilkl34)** on Telegram.
+
+### Yandex Telemost
+Tunnels WireGuard through **Yandex Telemost WebRTC datachannels** - traffic looks like a Telemost meeting. No direct UDP to the server. Works in heavily filtered networks.
+
+Set `turn` to the Telemost room link, e.g. `https://telemost.yandex.ru/j/ROOM_ID`. Leave `peer` empty - the server-side proxy already knows the WireGuard endpoint.
+
+> **Access restricted**
+> As with SberJazz, the Telemost server-side component is not published publicly due to the same blocking-related reasons.
 > Contact **[@ilkl34](https://t.me/ilkl34)** on Telegram.
 
 ### Wildberries (WB)
@@ -100,6 +109,7 @@ The `turn` field selects both the backend and the room:
 | Backend | `turn` value | `peer` value |
 |---------|-------------|--------------|
 | Jazz    | `https://salutejazz.ru/call/ROOM_ID/PASSWORD` | *(empty)* |
+| Telemost | `https://telemost.yandex.ru/j/ROOM_ID` | *(empty)* |
 | WB      | `wb` | `YOUR_VPS_IP:56000` |
 | VK      | `https://vk.com/call/join/LINK_ID` | `YOUR_VPS_IP:56000` |
 
@@ -115,6 +125,7 @@ The `turn` field selects both the backend and the room:
 ```
 
 > For Jazz mode the `peer` field must be **empty** — the server-side `jazz-turn-proxy` already knows the WireGuard endpoint.  
+> For Telemost mode the `peer` field must be **empty** - the server-side proxy already knows the WireGuard endpoint.  
 > For WB/VK mode `peer` points to your VPS running `vk-turn-proxy` (default port `56000`).
 
 ### Generate a Quick Import Link

@@ -11,7 +11,7 @@ config = {
 PrivateKey = YOUR_CLIENT_PRIVATE_KEY
 Address = 10.77.77.2/24
 DNS = 8.8.8.8
-MTU = 1280
+MTU = 1180
 
 [Peer]
 PublicKey = YOUR_SERVER_PUBLIC_KEY

@@ -298,6 +298,20 @@ func getVKCredsOnce(link, clientID, clientSecret string) (resUser string, resPas
 
 		if powErr != nil {
 			// All automatic PoW attempts failed — fall back to WebView if a handler is set.
+			// The currentCaptcha.RedirectUri was already visited by fetchPowInput during the
+			// last PoW attempt, so VK would return a stale page. Request a fresh captcha URL
+			// that has never been fetched, so the WebView gets a clean session.
+			freshData := fmt.Sprintf("vk_join_link=https://vk.com/call/join/%s&name=%s&access_token=%s",
+				link, escapedName, token1)
+			if freshResp, freshErr := doRequest(freshData, step2URL); freshErr == nil {
+				if fe, ok := freshResp["error"].(map[string]interface{}); ok {
+					freshCaptcha := ParseVkCaptchaError(fe)
+					if freshCaptcha.IsCaptchaError() {
+						log.Printf("vk: refreshed captcha URI for WebView")
+						currentCaptcha = freshCaptcha
+					}
+				}
+			}
 			if proxyCaptchaFunc != nil && currentCaptcha.RedirectUri != "" {
 				log.Printf("vk: PoW exhausted, requesting WebView for %s", currentCaptcha.RedirectUri)
 				cURI := C.CString(currentCaptcha.RedirectUri)

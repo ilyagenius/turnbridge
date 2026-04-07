@@ -97,6 +97,10 @@ class VKCaptchaViewController: UIViewController {
         webView = WKWebView(frame: .zero, configuration: config)
         webView.translatesAutoresizingMaskIntoConstraints = false
         webView.navigationDelegate = self
+        // Set a consistent UA for all requests the webView makes (including JS fetch/XHR),
+        // not just the initial URLRequest. Using a mobile Chrome UA for best compatibility
+        // with VK's captcha widget on iOS.
+        webView.customUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/136.0.7103.56 Mobile/15E148 Safari/604.1"
         view.addSubview(webView)
 
         NSLayoutConstraint.activate([
@@ -112,14 +116,7 @@ class VKCaptchaViewController: UIViewController {
             onDismiss()
             return
         }
-        var request = URLRequest(url: url)
-        // Match the User-Agent the Go code used when fetching the captcha page,
-        // so VK's session cookies are considered valid.
-        request.setValue(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
-            forHTTPHeaderField: "User-Agent"
-        )
-        webView.load(request)
+        webView.load(URLRequest(url: url))
     }
 
     func deliverToken(_ token: String) {
@@ -147,7 +144,18 @@ class VKCaptchaViewController: UIViewController {
 // MARK: - WKNavigationDelegate
 extension VKCaptchaViewController: WKNavigationDelegate {
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-        // Navigation errors are non-fatal; the user can see the error in the WebView.
+        showError(error)
+    }
+
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        showError(error)
+    }
+
+    private func showError(_ error: Error) {
+        let html = "<html><body style='font-family:-apple-system;padding:20px;color:#c00'>" +
+                   "<b>Failed to load captcha page</b><br><br>\(error.localizedDescription)" +
+                   "</body></html>"
+        webView.loadHTMLString(html, baseURL: nil)
     }
 
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,

@@ -205,6 +205,7 @@ struct ProfileRow: View {
     let onTap: () -> Void
     let onEdit: () -> Void
     let onDelete: () -> Void
+    let onPasteConfig: () -> Void
 
     var provider: TunnelProvider { TunnelProvider.detect(from: profile.vkLink) }
 
@@ -242,7 +243,7 @@ struct ProfileRow: View {
         .background(isSelected ? Color.blue.opacity(0.08) : Color.clear)
         .contentShape(Rectangle())
         .onTapGesture { if !isConnected { onTap() } }
-        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
             Button(role: .destructive, action: onDelete) {
                 Label("Delete", systemImage: "trash")
             }
@@ -251,6 +252,10 @@ struct ProfileRow: View {
                     Label("Edit", systemImage: "pencil")
                 }
                 .tint(.orange)
+                Button(action: onPasteConfig) {
+                    Label("Paste Config", systemImage: "doc.on.clipboard")
+                }
+                .tint(.blue)
             }
         }
     }
@@ -387,6 +392,9 @@ struct ContentView: View {
                                                 withAnimation {
                                                     store.deleteProfile(profile.id)
                                                 }
+                                            },
+                                            onPasteConfig: {
+                                                pasteConfigIntoProfile(profile)
                                             }
                                         )
 
@@ -742,6 +750,28 @@ struct ContentView: View {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                 showAlert(title: "Error", message: error.localizedDescription)
             }
+        }
+    }
+
+    private func pasteConfigIntoProfile(_ existing: VPNProfile) {
+        guard let clipboardString = UIPasteboard.general.string else {
+            showAlert(title: "Error", message: "Clipboard is empty.")
+            return
+        }
+        do {
+            let config = try ConfigParser.parse(from: clipboardString)
+            var updated = existing
+            updated.vkLink       = config.turn
+            updated.peerAddr     = config.peer
+            updated.listenAddr   = config.listen
+            updated.nValue       = config.n
+            updated.wgQuickConfig = config.wg
+            store.updateProfile(updated)
+            SharedLogger.info("Profile \"\(existing.name)\" updated from clipboard")
+            showAlert(title: "Updated", message: "Profile \"\(existing.name)\" config replaced.")
+        } catch {
+            SharedLogger.error("Paste config failed: \(error.localizedDescription)")
+            showAlert(title: "Error", message: error.localizedDescription)
         }
     }
 

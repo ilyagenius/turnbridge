@@ -888,10 +888,8 @@ func newJazzClientPeerConnection(rtcConfig *jazzRTCConfig) (*webrtc.PeerConnecti
 	}
 
 	return webrtc.NewPeerConnection(webrtc.Configuration{
-		// Match the browser's default ICE policy instead of forcing relay-only.
-		// Real Jazz sessions still choose relay candidates, but they also expose
-		// host/srflx candidates during gathering.
-		ICEServers: iceServers,
+		ICEServers:         iceServers,
+		ICETransportPolicy: webrtc.ICETransportPolicyRelay,
 	})
 }
 

@@ -3,6 +3,8 @@ package main
 import (
     "fmt"
     mathrand "math/rand"
+    "regexp"
+    "strings"
 )
 
 type Profile struct {
@@ -78,4 +80,37 @@ func generateName() string {
         return fmt.Sprintf("%s %sа", fn, ln)
     }
     return fmt.Sprintf("%s %s", fn, ln)
+}
+
+// SecChUAPlatform returns the sec-ch-ua-platform value matching the User-Agent OS.
+func (p Profile) SecChUAPlatform() string {
+    if strings.Contains(p.UserAgent, "Windows") {
+        return `"Windows"`
+    }
+    if strings.Contains(p.UserAgent, "Macintosh") {
+        return `"macOS"`
+    }
+    return `"Linux"`
+}
+
+// ChromeVersion extracts the Chrome major version from the User-Agent string.
+func (p Profile) ChromeVersion() string {
+    re := regexp.MustCompile(`Chrome/(\d+)`)
+    m := re.FindStringSubmatch(p.UserAgent)
+    if len(m) >= 2 {
+        return m[1]
+    }
+    return "120"
+}
+
+// SecChUA returns a sec-ch-ua header value consistent with the User-Agent browser.
+func (p Profile) SecChUA() string {
+    v := p.ChromeVersion()
+    if strings.Contains(p.UserAgent, "Edg/") {
+        return fmt.Sprintf(`"Chromium";v="%s", "Not-A.Brand";v="24", "Microsoft Edge";v="%s"`, v, v)
+    }
+    if strings.Contains(p.UserAgent, "OPR/") {
+        return fmt.Sprintf(`"Chromium";v="%s", "Not-A.Brand";v="24", "Opera";v="%s"`, v, v)
+    }
+    return fmt.Sprintf(`"Chromium";v="%s", "Not-A.Brand";v="24", "Google Chrome";v="%s"`, v, v)
 }

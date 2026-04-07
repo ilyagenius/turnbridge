@@ -9,6 +9,20 @@ import os
 
 let sharedLogger = Logger(subsystem: "com.netlab.TurnBridge.network-extension", category: "wgtunnel")
 
+// C callback: Go calls this when automatic PoW fails and a WebView is needed.
+// We store the URL in App Group UserDefaults so the main app can observe it.
+private let goProxyCaptchaCallback: @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<CChar>?) -> Void = { _, redirectUriCStr in
+    let redirectUri = redirectUriCStr.map { String(cString: $0) } ?? ""
+    guard !redirectUri.isEmpty else { return }
+    sharedLogger.log("[Captcha] WebView fallback requested: \(redirectUri, privacy: .public)")
+    SharedLogger.info("Captcha WebView needed: \(redirectUri)", source: .tunnel)
+    if let groupID = SharedLogger.appGroupID,
+       let defaults = UserDefaults(suiteName: groupID) {
+        defaults.set(redirectUri, forKey: "tb_captcha_url")
+        defaults.synchronize()
+    }
+}
+
 enum PacketTunnelProviderError: String, Error {
     case invalidProtocolConfiguration
     case cantParseWgQuickConfig
@@ -90,6 +104,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         SharedLogger.info("Starting TURN proxy...", source: .tunnel)
 
         ProxySetLogger(nil, goProxyCLoggerCallback)
+        ProxySetCaptchaHandler(nil, goProxyCaptchaCallback)
 
         DispatchQueue.global(qos: .userInteractive).async {
             StartProxy(vkLink, peerAddr, listenAddr, nValue)
@@ -155,8 +170,31 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     
 
     override func handleAppMessage(_ messageData: Data, completionHandler: ((Data?) -> Void)?) {
-        guard let message = String(data: messageData, encoding: .utf8), message == "stats" else {
-            completionHandler?(messageData)
+        guard let message = String(data: messageData, encoding: .utf8) else {
+            completionHandler?(nil)
+            return
+        }
+
+        // Captcha token from WebView: "captcha:SUCCESS_TOKEN"
+        if message.hasPrefix("captcha:") {
+            let token = String(message.dropFirst("captcha:".count))
+            sharedLogger.log("[Captcha] Received WebView token (\(token.count, privacy: .public) chars)")
+            SharedLogger.info("Captcha WebView token received", source: .tunnel)
+            // Clear the pending captcha URL so ContentView dismisses the sheet
+            if let groupID = SharedLogger.appGroupID,
+               let defaults = UserDefaults(suiteName: groupID) {
+                defaults.removeObject(forKey: "tb_captcha_url")
+                defaults.synchronize()
+            }
+            token.withCString { cToken in
+                ProxySolveCaptcha(cToken)
+            }
+            completionHandler?(nil)
+            return
+        }
+
+        guard message == "stats" else {
+            completionHandler?(nil)
             return
         }
         adapter.getRuntimeConfiguration { configStr in

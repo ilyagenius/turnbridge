@@ -270,6 +270,10 @@ struct ContentView: View {
     @State private var alertMessage = ""
     @State private var settingsSheet: SettingsSheet?
 
+    // Captcha WebView fallback
+    @State private var captchaURL: String? = nil
+    @State private var showCaptchaSheet = false
+
     private var selectedProvider: TunnelProvider {
         guard let p = store.selectedProfile else { return .unknown }
         return TunnelProvider.detect(from: p.vkLink)
@@ -486,6 +490,31 @@ struct ContentView: View {
             .sheet(item: $settingsSheet) { sheet in
                 NavigationStack { SettingsView(store: store, profileID: sheet.profileID, isNewProfile: sheet.isNew) }
             }
+            .sheet(isPresented: $showCaptchaSheet, onDismiss: {
+                // User closed the sheet without solving — clear the pending URL
+                if let groupID = SharedLogger.appGroupID,
+                   let defaults = UserDefaults(suiteName: groupID) {
+                    defaults.removeObject(forKey: "tb_captcha_url")
+                }
+                captchaURL = nil
+            }) {
+                if let url = captchaURL {
+                    NavigationStack {
+                        VKCaptchaSheet(redirectUri: url, onToken: { token in
+                            submitCaptchaToken(token)
+                        }, onDismiss: {
+                            showCaptchaSheet = false
+                        })
+                        .navigationTitle("Verify — Not a Robot")
+                        .navigationBarTitleDisplayMode(.inline)
+                        .toolbar {
+                            ToolbarItem(placement: .navigationBarLeading) {
+                                Button("Cancel") { showCaptchaSheet = false }
+                            }
+                        }
+                    }
+                }
+            }
             .onAppear(perform: checkInitialStatus)
             .onReceive(NotificationCenter.default.publisher(for: .NEVPNStatusDidChange)) { notification in
                 if let conn = notification.object as? NEVPNConnection {
@@ -552,7 +581,37 @@ struct ContentView: View {
     private func startStatsTimer() {
         statsTimer?.invalidate()
         loadStats()
-        statsTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { _ in loadStats() }
+        statsTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { _ in
+            loadStats()
+            checkCaptchaRequest()
+        }
+    }
+
+    /// Polls App Group UserDefaults for a pending captcha URL written by the Network Extension.
+    private func checkCaptchaRequest() {
+        guard let groupID = SharedLogger.appGroupID,
+              let defaults = UserDefaults(suiteName: groupID) else { return }
+        let url = defaults.string(forKey: "tb_captcha_url") ?? ""
+        DispatchQueue.main.async {
+            if !url.isEmpty && !self.showCaptchaSheet {
+                self.captchaURL = url
+                self.showCaptchaSheet = true
+            } else if url.isEmpty && self.showCaptchaSheet {
+                self.showCaptchaSheet = false
+                self.captchaURL = nil
+            }
+        }
+    }
+
+    /// Sends the success_token obtained from the captcha WebView back to the Network Extension.
+    private func submitCaptchaToken(_ token: String) {
+        showCaptchaSheet = false
+        captchaURL = nil
+        NETunnelProviderManager.loadAllFromPreferences { managers, _ in
+            guard let session = managers?.first?.connection as? NETunnelProviderSession,
+                  let data = "captcha:\(token)".data(using: .utf8) else { return }
+            try? session.sendProviderMessage(data) { _ in }
+        }
     }
 
     private func stopStatsTimer() {

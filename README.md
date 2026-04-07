@@ -16,7 +16,8 @@ Tunnels WireGuard through **SberJazz WebRTC datachannels** — traffic looks lik
 Set `turn` to the Jazz room link printed by `jazz-turn-proxy`, e.g. `https://salutejazz.ru/call/ROOM_ID/PASSWORD`. Leave `peer` empty — the server-side proxy already knows the WireGuard endpoint.
 
 > **Server component required.**
-> Contact **[@ilkl34](https://t.me/ilkl34)** on Telegram to get the `jazz-turn-proxy` binary.
+> Due to ongoing blocking in Russia, the `jazz-turn-proxy` server binary is distributed privately for a small fee.
+> Contact **[@ilkl34](https://t.me/ilkl34)** on Telegram.
 
 ### Wildberries (WB)
 Tunnels WireGuard through **Wildberries TURN servers** — traffic looks like WB video streaming.
@@ -28,8 +29,6 @@ The original backend — tunnels through **VK TURN servers** using DTLS. Traffic
 
 Set `turn` to a VK call join link and `peer` to your VPS address with vk-turn-proxy port.
 
-> **Access is currently restricted.**
-> Server binaries and additional modules are not publicly released. Contact **[@ilkl34](https://t.me/ilkl34)** on Telegram.
 
 ---
 

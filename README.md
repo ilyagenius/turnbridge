@@ -6,24 +6,42 @@ To run the application, you must use a [server](https://github.com/cacggghp/vk-t
 
 The project is based on the repositories listed in the **Acknowledgments** section.
 
-## 🔒 SberJazz / SaluteJazz Mode
+## 🔒 Tunnel Providers
 
-TurnBridge supports tunneling WireGuard traffic through **SberJazz (SaluteJazz) WebRTC datachannels** — no direct UDP connection to the server required, works even in heavily filtered networks.
+TurnBridge supports multiple WebRTC/TURN tunnel backends, each disguising WireGuard traffic as legitimate platform traffic:
+
+### SberJazz / SaluteJazz
+Tunnels WireGuard through **SberJazz WebRTC datachannels** — traffic looks like a Sber video call. No direct UDP to the server. Works in heavily filtered networks.
+
+Set `turn` to the Jazz room link printed by `jazz-turn-proxy`, e.g. `https://salutejazz.ru/call/ROOM_ID/PASSWORD`. Leave `peer` empty — the server-side proxy already knows the WireGuard endpoint.
+
+> **Server component required.**
+> Contact **[@ilkl34](https://t.me/ilkl34)** on Telegram to get the `jazz-turn-proxy` binary.
+
+### Wildberries (WB)
+Tunnels WireGuard through **Wildberries TURN servers** — traffic looks like WB video streaming.
+
+Set `turn` to `wb` and `peer` to your VPS address with the vk-turn-proxy port (e.g. `158.160.x.x:56000`).
+
+### VK (VKontakte)
+The original backend — tunnels through **VK TURN servers** using DTLS. Traffic looks like a VK video call.
+
+Set `turn` to a VK call join link and `peer` to your VPS address with vk-turn-proxy port.
 
 > **Access is currently restricted.**
-> The server-side component and the required client modules for Jazz mode are not publicly available due to ongoing blocks in Russia.
-> To get access to the server binary and additional modules, contact: **[@ilkl34](https://t.me/ilkl34)** on Telegram.
+> Server binaries and additional modules are not publicly released. Contact **[@ilkl34](https://t.me/ilkl34)** on Telegram.
 
 ---
 
 ## ✨ Features
 
-* **Custom Routing:** Route your traffic through specific TURN protocols and WG endpoints.
+* **Multiple Tunnel Backends:** Jazz (SberJazz), WB (Wildberries), and VK TURN — all disguising traffic as legitimate Russian platform traffic.
 * **WireGuard & Amnezia WG Integration:**
   - Complete WireGuard protocol support with key management, routing, and DNS configuration
   - Full Amnezia WireGuard obfuscation support including jitter parameters (Jc, Jmin, Jmax), packet size obfuscation (S1-S4), and magic headers (H1-H4)
 * **1-Click Import:** Quickly import complex configurations via base64-encoded clipboard links (`turnbridge://`).
-* **Multi-Profile Management:** Create, edit, and seamlessly switch between multiple VPN configurations using a convenient dropdown picker.
+* **Multi-Profile Management:** Create, edit (swipe left), and switch between multiple VPN profiles — each showing its provider (Jazz / VK / WB) with a color badge.
+* **Redesigned UI:** Live connection uptime timer, per-provider color badges, swipe-to-delete profiles, animated connection orb.
 
 ## 📸 Screenshot
 ![Main Screen](screen.png)
@@ -78,21 +96,33 @@ TurnBridge uses a specific JSON structure encoded in Base64 for fast configurati
 
 ### Configuration JSON Structure
 
+The `turn` field selects both the backend and the room:
+
+| Backend | `turn` value | `peer` value |
+|---------|-------------|--------------|
+| Jazz    | `https://salutejazz.ru/call/ROOM_ID/PASSWORD` | *(empty)* |
+| WB      | `wb` | `YOUR_VPS_IP:56000` |
+| VK      | `https://vk.com/call/join/LINK_ID` | `YOUR_VPS_IP:56000` |
+
 ```json
 {
-  "turn": "https://vk.com/call/join/...",
-  "peer": "SERVER_IP:PORT",
+  "name": "My Server",
+  "turn": "https://salutejazz.ru/call/ROOM_ID/PASSWORD",
+  "peer": "",
   "listen": "127.0.0.1:9000",
   "n": 1,
-  "wg": "[Interface]\nPrivateKey = ...\nAddress = 10.100.0.2/32\nDNS = 8.8.8.8\nMTU = 1280\n\n[Peer]\nPublicKey = ...\nAllowedIPs = 0.0.0.0/0\nEndpoint = 127.0.0.1:9000\nPersistentKeepalive = 25"
+  "wg": "[Interface]\nPrivateKey = ...\nAddress = 10.77.77.2/24\nDNS = 8.8.8.8\nMTU = 1280\n\n[Peer]\nPublicKey = ...\nAllowedIPs = 0.0.0.0/0, ::/0\nEndpoint = 127.0.0.1:9000\nPersistentKeepalive = 25"
 }
 ```
+
+> For Jazz mode the `peer` field must be **empty** — the server-side `jazz-turn-proxy` already knows the WireGuard endpoint.  
+> For WB/VK mode `peer` points to your VPS running `vk-turn-proxy` (default port `56000`).
 
 ### Generate a Quick Import Link
 
 You can use the included `quick_link.py` script to easily generate valid `turnbridge://` clipboard links.
 
-For Jazz mode, set `turn` to the link printed by `jazz-turn-proxy`, for example `https://salutejazz.ru/call/ROOM_ID/PASSWORD`.
+Fill in the `config` dict with your chosen provider settings (see table above), then run:
 
 1. Open `quick_link.py` in your text editor and replace the placeholder values in the `config` dictionary with your actual server parameters and WireGuard keys.
 2. Run the script from your terminal:

@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-const jazzCallLinkExample = "https://salutejazz.ru/call/ROOM_ID/PASSWORD"
+const jazzCallLinkExample = "https://salutejazz.ru/calls/ROOM_ID?psw=PASSWORD or https://salutejazz.ru/call/ROOM_ID/PASSWORD"
 
 type jazzRoomInfo struct {
 	RoomID   string
@@ -16,8 +16,8 @@ type jazzRoomInfo struct {
 
 // isJazzSignalingLink detects Jazz call links of the form:
 //
-//	https://salutejazz.ru/call/ROOM_ID/PASSWORD
-//	https://jazz.sber.ru/call/ROOM_ID/PASSWORD
+//	https://salutejazz.ru/calls/ROOM_ID?psw=PASSWORD  (new format)
+//	https://salutejazz.ru/call/ROOM_ID/PASSWORD        (old format)
 func isJazzSignalingLink(link string) bool {
 	parsed, err := neturl.Parse(strings.TrimSpace(link))
 	if err != nil {
@@ -28,12 +28,16 @@ func isJazzSignalingLink(link string) bool {
 		return false
 	}
 
-	return strings.HasPrefix(strings.ToLower(parsed.EscapedPath()), "/call/")
+	path := strings.ToLower(parsed.EscapedPath())
+	return strings.HasPrefix(path, "/call/") || strings.HasPrefix(path, "/calls/")
 }
 
 // fetchJazzRoom parses room ID and password directly from the Jazz call link.
 // No HTTP request to VPS - all parsing is local.
-// Link format: https://salutejazz.ru/call/{ROOM_ID}/{PASSWORD}
+// Supported formats:
+//
+//	https://salutejazz.ru/calls/ROOM_ID?psw=PASSWORD  (new)
+//	https://salutejazz.ru/call/ROOM_ID/PASSWORD        (old)
 func fetchJazzRoom(_ context.Context, link string) (*jazzRoomInfo, error) {
 	parsed, err := neturl.Parse(strings.TrimSpace(link))
 	if err != nil {
@@ -45,24 +49,40 @@ func fetchJazzRoom(_ context.Context, link string) (*jazzRoomInfo, error) {
 	}
 
 	parts := strings.Split(strings.Trim(parsed.EscapedPath(), "/"), "/")
-	if len(parts) != 3 || !strings.EqualFold(parts[0], "call") {
-		return nil, fmt.Errorf("invalid Jazz call link, expected %s", jazzCallLinkExample)
+
+	// New format: /calls/ROOM_ID?psw=PASSWORD
+	if len(parts) == 2 && strings.EqualFold(parts[0], "calls") {
+		roomID, err := neturl.PathUnescape(parts[1])
+		if err != nil || roomID == "" {
+			return nil, fmt.Errorf("invalid Jazz room ID in %s", jazzCallLinkExample)
+		}
+		password := parsed.Query().Get("psw")
+		if password == "" {
+			return nil, fmt.Errorf("invalid Jazz link: missing psw parameter")
+		}
+		return &jazzRoomInfo{
+			RoomID:   roomID,
+			Password: password,
+		}, nil
 	}
 
-	roomID, err := neturl.PathUnescape(parts[1])
-	if err != nil || roomID == "" {
-		return nil, fmt.Errorf("invalid Jazz room ID in %s", jazzCallLinkExample)
+	// Old format: /call/ROOM_ID/PASSWORD
+	if len(parts) == 3 && strings.EqualFold(parts[0], "call") {
+		roomID, err := neturl.PathUnescape(parts[1])
+		if err != nil || roomID == "" {
+			return nil, fmt.Errorf("invalid Jazz room ID in %s", jazzCallLinkExample)
+		}
+		password, err := neturl.PathUnescape(parts[2])
+		if err != nil || password == "" {
+			return nil, fmt.Errorf("invalid Jazz password in %s", jazzCallLinkExample)
+		}
+		return &jazzRoomInfo{
+			RoomID:   roomID,
+			Password: password,
+		}, nil
 	}
 
-	password, err := neturl.PathUnescape(parts[2])
-	if err != nil || password == "" {
-		return nil, fmt.Errorf("invalid Jazz password in %s", jazzCallLinkExample)
-	}
-
-	return &jazzRoomInfo{
-		RoomID:   roomID,
-		Password: password,
-	}, nil
+	return nil, fmt.Errorf("invalid Jazz call link, expected %s", jazzCallLinkExample)
 }
 
 func isJazzCallHost(host string) bool {

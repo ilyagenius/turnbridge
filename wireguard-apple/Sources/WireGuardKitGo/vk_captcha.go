@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
+	"crypto/md5"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -10,34 +10,20 @@ import (
 	"fmt"
 	"io"
 	"log"
-	mathrand "math/rand"
 	"net"
 	"net/http"
 	"net/http/cookiejar"
-	"net/url"
+	neturl "net/url"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
-
-	utls "github.com/refraction-networking/utls"
 )
 
 var captchaMu sync.Mutex
 
-func randomHex(n int) string {
-	b := make([]byte, n)
-	if _, err := rand.Read(b); err != nil {
-		for i := range b {
-			b[i] = byte(mathrand.Intn(256))
-		}
-	}
-	return hex.EncodeToString(b)
-}
-
-// sha256("") — VK expects a consistent, browser-invariant debug_info value.
-const debugInfoHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+// region VkCaptchaError
 
 type VkCaptchaError struct {
 	ErrorCode               int
@@ -56,14 +42,11 @@ func ParseVkCaptchaError(errData map[string]interface{}) *VkCaptchaError {
 	code := int(codeFloat)
 
 	redirectUri, _ := errData["redirect_uri"].(string)
-
-	// captcha_sid may be string or float64
-	var captchaSid string
-	switch v := errData["captcha_sid"].(type) {
-	case string:
-		captchaSid = v
-	case float64:
-		captchaSid = fmt.Sprintf("%.0f", v)
+	captchaSid, _ := errData["captcha_sid"].(string)
+	if captchaSid == "" {
+		if sidNum, ok := errData["captcha_sid"].(float64); ok {
+			captchaSid = fmt.Sprintf("%.0f", sidNum)
+		}
 	}
 
 	captchaImg, _ := errData["captcha_img"].(string)
@@ -71,29 +54,25 @@ func ParseVkCaptchaError(errData map[string]interface{}) *VkCaptchaError {
 
 	var sessionToken string
 	if redirectUri != "" {
-		if parsed, err := url.Parse(redirectUri); err == nil {
+		if parsed, err := neturl.Parse(redirectUri); err == nil {
 			sessionToken = parsed.Query().Get("session_token")
 		}
 	}
 
 	isSound, _ := errData["is_sound_captcha_available"].(bool)
 
-	// captcha_ts: float or string
 	var captchaTs string
-	switch v := errData["captcha_ts"].(type) {
-	case float64:
-		captchaTs = fmt.Sprintf("%.3f", v)
-	case string:
-		captchaTs = v
+	if tsFloat, ok := errData["captcha_ts"].(float64); ok {
+		captchaTs = fmt.Sprintf("%.0f", tsFloat)
+	} else if tsStr, ok := errData["captcha_ts"].(string); ok {
+		captchaTs = tsStr
 	}
 
-	// captcha_attempt: float or string
 	var captchaAttempt string
-	switch v := errData["captcha_attempt"].(type) {
-	case float64:
-		captchaAttempt = fmt.Sprintf("%.0f", v)
-	case string:
-		captchaAttempt = v
+	if attFloat, ok := errData["captcha_attempt"].(float64); ok {
+		captchaAttempt = fmt.Sprintf("%.0f", attFloat)
+	} else if attStr, ok := errData["captcha_attempt"].(string); ok {
+		captchaAttempt = attStr
 	}
 
 	return &VkCaptchaError{
@@ -113,355 +92,556 @@ func (e *VkCaptchaError) IsCaptchaError() bool {
 	return e.ErrorCode == 14 && e.RedirectUri != "" && e.SessionToken != ""
 }
 
-// newCaptchaClient creates an HTTP client with:
-//   - a cookie jar (cookies from id.vk.ru flow to api.vk.ru API calls)
-//   - a uTLS dialer that presents a Chrome ClientHello (avoids Go JA3 fingerprint)
-func newCaptchaClient() *http.Client {
-	jar, _ := cookiejar.New(nil)
-	dialer := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
-	transport := &http.Transport{
-		// DialTLSContext replaces stdlib TLS with a Chrome-fingerprinted uTLS handshake.
-		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			host, _, _ := net.SplitHostPort(addr)
-			conn, err := dialer.DialContext(ctx, network, addr)
-			if err != nil {
-				return nil, err
-			}
-			uconn := utls.UClient(conn, &utls.Config{ServerName: host}, utls.HelloChrome_Auto)
-			if err := uconn.HandshakeContext(ctx); err != nil {
-				conn.Close()
-				return nil, err
-			}
-			return uconn, nil
-		},
-		DialContext:       dialer.DialContext,
-		MaxIdleConns:      10,
-		IdleConnTimeout:   90 * time.Second,
-		ForceAttemptHTTP2: true,
-	}
-	return &http.Client{
-		Jar:       jar,
-		Timeout:   30 * time.Second,
-		Transport: transport,
+// endregion
+
+// region Captcha types
+
+type captchaBootstrap struct {
+	PowInput   string
+	Difficulty int
+	Settings   *captchaSettingsResponse
+}
+
+type captchaSettingsResponse struct {
+	ShowCaptchaType string
+	SettingsByType  map[string]string
+}
+
+type captchaCheckResult struct {
+	Status          string
+	SuccessToken    string
+	ShowCaptchaType string
+}
+
+// endregion
+
+// region Captcha session
+
+type captchaSession struct {
+	ctx          context.Context
+	client       *http.Client
+	profile      Profile
+	sessionToken string
+	hash         string
+	browserFp    string
+}
+
+func newCaptchaSession(ctx context.Context, client *http.Client, profile Profile, sessionToken string, hash string) *captchaSession {
+	return &captchaSession{
+		ctx:          ctx,
+		client:       client,
+		profile:      profile,
+		sessionToken: sessionToken,
+		hash:         hash,
+		browserFp:    generateBrowserFp(profile),
 	}
 }
 
-// solveVkCaptcha picks a browser profile, fetches the PoW challenge, solves it,
-// and submits the 4-step captchaNotRobot API sequence.
-// Returns the success_token to include in the VK calls.getAnonymousToken retry.
-func solveVkCaptcha(ctx context.Context, captchaErr *VkCaptchaError) (string, error) {
+func (s *captchaSession) baseValues() neturl.Values {
+	values := neturl.Values{}
+	values.Set("session_token", s.sessionToken)
+	values.Set("domain", "vk.com")
+	values.Set("adFp", "")
+	values.Set("access_token", "")
+	return values
+}
+
+func (s *captchaSession) request(method string, values neturl.Values) (map[string]interface{}, error) {
+	reqURL := "https://api.vk.ru/method/" + method + "?v=5.131"
+
+	req, err := http.NewRequestWithContext(s.ctx, "POST", reqURL, strings.NewReader(values.Encode()))
+	if err != nil {
+		return nil, err
+	}
+
+	applyBrowserHeaders(req, s.profile)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("Origin", "https://id.vk.ru")
+	req.Header.Set("Referer", "https://id.vk.ru/")
+	req.Header.Set("Sec-Fetch-Site", "same-site")
+	req.Header.Set("Sec-Fetch-Mode", "cors")
+	req.Header.Set("Sec-Fetch-Dest", "empty")
+	req.Header.Set("Sec-GPC", "1")
+	req.Header.Set("Priority", "u=1, i")
+
+	httpResp, err := s.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer httpResp.Body.Close()
+
+	body, err := io.ReadAll(httpResp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	var resp map[string]interface{}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
+func (s *captchaSession) requestSettings() (*captchaSettingsResponse, error) {
+	resp, err := s.request("captchaNotRobot.settings", s.baseValues())
+	if err != nil {
+		return nil, fmt.Errorf("settings failed: %w", err)
+	}
+	return parseCaptchaSettingsResponse(resp)
+}
+
+func (s *captchaSession) requestComponentDone() error {
+	values := s.baseValues()
+	values.Set("browser_fp", s.browserFp)
+	values.Set("device", buildCaptchaDeviceJSON(s.profile))
+
+	resp, err := s.request("captchaNotRobot.componentDone", values)
+	if err != nil {
+		return fmt.Errorf("componentDone failed: %w", err)
+	}
+
+	respObj, ok := resp["response"].(map[string]interface{})
+	if ok {
+		if status, _ := respObj["status"].(string); status != "" && status != "OK" {
+			return fmt.Errorf("componentDone status: %s", status)
+		}
+	}
+
+	return nil
+}
+
+func (s *captchaSession) requestCheckboxCheck() (*captchaCheckResult, error) {
+	return s.requestCheck("[]", base64.StdEncoding.EncodeToString([]byte("{}")))
+}
+
+func (s *captchaSession) requestSliderContent(sliderSettings string) (*sliderCaptchaContent, error) {
+	values := s.baseValues()
+	if sliderSettings != "" {
+		values.Set("captcha_settings", sliderSettings)
+	}
+
+	resp, err := s.request("captchaNotRobot.getContent", values)
+	if err != nil {
+		return nil, fmt.Errorf("getContent failed: %w", err)
+	}
+	return parseSliderCaptchaContentResponse(resp)
+}
+
+func (s *captchaSession) requestSliderCheck(activeSteps []int, candidateIndex int, candidateCount int) (*captchaCheckResult, error) {
+	answer, err := encodeSliderAnswer(activeSteps)
+	if err != nil {
+		return nil, err
+	}
+
+	return s.requestCheck(generateSliderCursor(candidateIndex, candidateCount), answer)
+}
+
+func (s *captchaSession) requestCheck(cursor string, answer string) (*captchaCheckResult, error) {
+	debugInfoBytes := md5.Sum([]byte(s.profile.UserAgent + strconv.FormatInt(time.Now().UnixNano(), 10)))
+	debugInfo := hex.EncodeToString(debugInfoBytes[:])
+
+	values := s.baseValues()
+	values.Set("accelerometer", "[]")
+	values.Set("gyroscope", "[]")
+	values.Set("motion", "[]")
+	values.Set("cursor", cursor)
+	values.Set("taps", "[]")
+	values.Set("connectionRtt", "[50,50,50,50,50,50,50,50,50,50]")
+	values.Set("connectionDownlink", "[9.5,9.5,9.5,9.5,9.5,9.5,9.5,9.5,9.5,9.5,9.5,9.5,9.5,9.5,9.5,9.5]")
+	values.Set("browser_fp", s.browserFp)
+	values.Set("hash", s.hash)
+	values.Set("answer", answer)
+	values.Set("debug_info", debugInfo)
+
+	resp, err := s.request("captchaNotRobot.check", values)
+	if err != nil {
+		return nil, fmt.Errorf("check failed: %w", err)
+	}
+	return parseCaptchaCheckResultResponse(resp)
+}
+
+func (s *captchaSession) requestEndSession() {
+	log.Printf("[Captcha] Step 4/4: endSession")
+	if _, err := s.request("captchaNotRobot.endSession", s.baseValues()); err != nil {
+		log.Printf("[Captcha] Warning: endSession failed: %v", err)
+	}
+}
+
+// endregion
+
+// region Main captcha solver
+
+func createCaptchaHTTPClient() *http.Client {
+	jar, _ := cookiejar.New(nil)
+	return &http.Client{
+		Timeout: 20 * time.Second,
+		Jar:     jar,
+		Transport: &http.Transport{
+			MaxIdleConns:        100,
+			MaxIdleConnsPerHost: 100,
+			IdleConnTimeout:     90 * time.Second,
+			TLSHandshakeTimeout: 10 * time.Second,
+			DialContext: (&net.Dialer{
+				Timeout:   20 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+		},
+	}
+}
+
+func solveVkCaptcha(ctx context.Context, captchaErr *VkCaptchaError, profile Profile) (string, error) {
 	captchaMu.Lock()
 	defer captchaMu.Unlock()
 
-	profile := getRandomProfile()
-	ua := profile.UserAgent
-	logUA := ua
-	if len(logUA) > 60 {
-		logUA = logUA[:60]
-	}
-	log.Printf("[Captcha] Solving PoW — UA: %s...", logUA)
+	log.Printf("[Captcha] Solving captcha...")
 
-	// Random initial delay (1.5–2.5s) matching real browser HAR timing
-	delay := time.Duration(1500+mathrand.Intn(1000)) * time.Millisecond
-	select {
-	case <-time.After(delay):
-	case <-ctx.Done():
-		return "", ctx.Err()
-	}
-
-	// One HTTP client with cookie jar for the entire captcha session.
-	// This ensures cookies from the captcha page are sent to the API calls.
-	client := newCaptchaClient()
-
-	sessionToken := captchaErr.SessionToken
-	if sessionToken == "" {
+	if captchaErr.SessionToken == "" {
 		return "", fmt.Errorf("no session_token in redirect_uri")
 	}
+	if captchaErr.RedirectUri == "" {
+		return "", fmt.Errorf("no redirect_uri for captcha solve")
+	}
 
-	powInput, difficulty, err := fetchPowInput(ctx, client, captchaErr.RedirectUri, profile)
+	client := createCaptchaHTTPClient()
+
+	bootstrap, err := fetchCaptchaBootstrap(ctx, captchaErr.RedirectUri, client, profile)
 	if err != nil {
-		return "", fmt.Errorf("fetchPoW: %w", err)
+		return "", fmt.Errorf("failed to fetch captcha bootstrap: %w", err)
 	}
-	log.Printf("[Captcha] PoW input=%s difficulty=%d", powInput, difficulty)
 
-	hash := solvePoW(powInput, difficulty)
-	if hash == "" {
-		return "", fmt.Errorf("PoW: no solution within 10M iterations")
-	}
-	log.Printf("[Captcha] PoW solved: %s...%s", hash[:8], hash[len(hash)-8:])
+	log.Printf("[Captcha] PoW input: %s, difficulty: %d", bootstrap.PowInput, bootstrap.Difficulty)
 
-	// Brief pause after PoW (simulate browser JS execution time)
-	time.Sleep(time.Duration(200+mathrand.Intn(300)) * time.Millisecond)
+	hash := solvePoW(bootstrap.PowInput, bootstrap.Difficulty)
+	log.Printf("[Captcha] PoW solved: hash=%s", hash)
 
-	successToken, err := callCaptchaNotRobot(ctx, client, sessionToken, hash, profile)
+	session := newCaptchaSession(ctx, client, profile, captchaErr.SessionToken, hash)
+
+	// Step 1: settings
+	log.Printf("[Captcha] Step 1/4: settings")
+	settingsResp, err := session.requestSettings()
 	if err != nil {
-		return "", fmt.Errorf("captchaNotRobot: %w", err)
+		return "", err
+	}
+	settingsResp = mergeCaptchaSettings(settingsResp, bootstrap.Settings)
+
+	time.Sleep(200 * time.Millisecond)
+
+	// Step 2: componentDone
+	log.Printf("[Captcha] Step 2/4: componentDone")
+	if err := session.requestComponentDone(); err != nil {
+		return "", err
 	}
 
-	log.Printf("[Captcha] Success! success_token=%d chars", len(successToken))
+	time.Sleep(200 * time.Millisecond)
+
+	// Step 3: checkbox check
+	log.Printf("[Captcha] Step 3/4: check (checkbox)")
+	initialCheck, err := session.requestCheckboxCheck()
+	if err != nil {
+		return "", err
+	}
+
+	if initialCheck.Status == "OK" {
+		if initialCheck.SuccessToken == "" {
+			return "", fmt.Errorf("success_token not found in checkbox check")
+		}
+		log.Printf("[Captcha] Checkbox check passed!")
+		session.requestEndSession()
+		return initialCheck.SuccessToken, nil
+	}
+
+	// Checkbox failed — try slider captcha
+	sliderSettings, hasSlider := settingsResp.SettingsByType[sliderCaptchaType]
+	log.Printf(
+		"[Captcha] Checkbox check returned status=%s (settings show_type=%q, check show_type=%q, available_types=%s)",
+		initialCheck.Status,
+		settingsResp.ShowCaptchaType,
+		initialCheck.ShowCaptchaType,
+		describeCaptchaTypes(settingsResp.SettingsByType),
+	)
+
+	if !hasSlider {
+		log.Printf("[Captcha] Slider settings not found. Trying getContent without captcha_settings...")
+	} else {
+		log.Printf("[Captcha] Trying slider solver...")
+	}
+
+	sliderContent, err := session.requestSliderContent(sliderSettings)
+	if err != nil {
+		return "", fmt.Errorf("checkbox status: %s (slider getContent failed: %w)", initialCheck.Status, err)
+	}
+
+	candidates, err := rankSliderCandidates(sliderContent.Image, sliderContent.Size, sliderContent.Steps)
+	if err != nil {
+		return "", err
+	}
+
+	log.Printf(
+		"[Captcha] Ranked %d slider positions; submitting top %d (attempt budget %d)",
+		len(candidates),
+		minInt(sliderContent.Attempts, len(candidates)),
+		sliderContent.Attempts,
+	)
+
+	successToken, err := trySliderCaptchaCandidates(candidates, sliderContent.Attempts, func(candidate sliderCandidate) (*captchaCheckResult, error) {
+		log.Printf("[Captcha] Slider guess position=%d score=%d", candidate.Index, candidate.Score)
+		return session.requestSliderCheck(candidate.ActiveSteps, candidate.Index, len(candidates))
+	})
+	if err != nil {
+		return "", err
+	}
+
+	log.Printf("[Captcha] Slider solved! Got success_token")
+	session.requestEndSession()
 	return successToken, nil
 }
 
-// fetchPowInput loads the VK captcha page and extracts the PoW challenge parameters.
-// The shared client carries the resulting cookies into subsequent API calls.
-func fetchPowInput(ctx context.Context, client *http.Client, redirectUri string, p Profile) (powInput string, difficulty int, err error) {
+// endregion
+
+// region Bootstrap & PoW
+
+func fetchCaptchaBootstrap(ctx context.Context, redirectUri string, client *http.Client, profile Profile) (*captchaBootstrap, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", redirectUri, nil)
 	if err != nil {
-		return "", 0, err
+		return nil, err
 	}
 
-	req.Header.Set("User-Agent", p.UserAgent)
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
-	req.Header.Set("Accept-Language", "en-US,en;q=0.9,ru;q=0.8")
-	req.Header.Set("sec-ch-ua", p.SecChUA())
-	req.Header.Set("sec-ch-ua-mobile", "?0")
-	req.Header.Set("sec-ch-ua-platform", p.SecChUAPlatform())
-	req.Header.Set("Sec-Fetch-Dest", "document")
-	req.Header.Set("Sec-Fetch-Mode", "navigate")
+	applyBrowserHeaders(req, profile)
 	req.Header.Set("Sec-Fetch-Site", "none")
-	req.Header.Set("Sec-Fetch-User", "?1")
-	req.Header.Set("Upgrade-Insecure-Requests", "1")
-	req.Header.Set("DNT", "1")
-	req.Header.Set("Sec-GPC", "1")
+	req.Header.Set("Sec-Fetch-Mode", "navigate")
+	req.Header.Set("Sec-Fetch-Dest", "document")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", 0, fmt.Errorf("GET captcha page: %w", err)
+		return nil, err
 	}
 	defer resp.Body.Close()
 
-	log.Printf("[Captcha] fetchPoW HTTP status=%d", resp.StatusCode)
-
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", 0, err
-	}
-	html := string(body)
-
-	// Extract: const powInput = "..."
-	powRe := regexp.MustCompile(`const\s+powInput\s*=\s*"([^"]+)"`)
-	m := powRe.FindStringSubmatch(html)
-	if len(m) < 2 {
-		preview := html
-		if len(preview) > 500 {
-			preview = preview[:500]
-		}
-		log.Printf("[Captcha] HTML preview: %s", preview)
-		return "", 0, fmt.Errorf("powInput not found (%d bytes)", len(html))
-	}
-	powInput = m[1]
-
-	// Extract: startsWith('0'.repeat(N))
-	diffRe := regexp.MustCompile(`startsWith\('0'\.repeat\((\d+)\)\)`)
-	dm := diffRe.FindStringSubmatch(html)
-	difficulty = 2
-	if len(dm) >= 2 {
-		if d, e := strconv.Atoi(dm[1]); e == nil {
-			difficulty = d
-		}
+		return nil, err
 	}
 
-	return powInput, difficulty, nil
+	return parseCaptchaBootstrapHTML(string(body))
 }
 
-// solvePoW brute-forces SHA-256 until the hex digest starts with `difficulty` zeros.
+func parseCaptchaBootstrapHTML(html string) (*captchaBootstrap, error) {
+	powInputRe := regexp.MustCompile(`const\s+powInput\s*=\s*"([^"]+)"`)
+	powInputMatch := powInputRe.FindStringSubmatch(html)
+	if len(powInputMatch) < 2 {
+		return nil, fmt.Errorf("powInput not found in captcha HTML")
+	}
+
+	difficulty := 2
+	for _, expr := range []*regexp.Regexp{
+		regexp.MustCompile(`startsWith\('0'\.repeat\((\d+)\)\)`),
+		regexp.MustCompile(`const\s+difficulty\s*=\s*(\d+)`),
+	} {
+		if match := expr.FindStringSubmatch(html); len(match) >= 2 {
+			if parsed, err := strconv.Atoi(match[1]); err == nil {
+				difficulty = parsed
+				break
+			}
+		}
+	}
+
+	settings, err := parseCaptchaSettingsFromHTML(html)
+	if err != nil {
+		return nil, err
+	}
+
+	return &captchaBootstrap{
+		PowInput:   powInputMatch[1],
+		Difficulty: difficulty,
+		Settings:   settings,
+	}, nil
+}
+
 func solvePoW(powInput string, difficulty int) string {
 	target := strings.Repeat("0", difficulty)
-	for nonce := 1; nonce <= 10_000_000; nonce++ {
+
+	for nonce := 1; nonce <= 10000000; nonce++ {
 		data := powInput + strconv.Itoa(nonce)
-		h := sha256.Sum256([]byte(data))
-		hexH := hex.EncodeToString(h[:])
-		if strings.HasPrefix(hexH, target) {
-			return hexH
+		hash := sha256.Sum256([]byte(data))
+		hexHash := hex.EncodeToString(hash[:])
+
+		if strings.HasPrefix(hexHash, target) {
+			return hexHash
 		}
 	}
 	return ""
 }
 
-// callCaptchaNotRobot executes the 4-step VK captchaNotRobot API handshake.
-// The shared client (with cookie jar) must be the same one used for fetchPowInput.
-func callCaptchaNotRobot(ctx context.Context, client *http.Client, sessionToken, hash string, p Profile) (string, error) {
-	vkReq := func(method, postData string) (map[string]interface{}, error) {
-		reqURL := "https://api.vk.ru/method/" + method + "?v=5.131"
+// endregion
 
-		req, err := http.NewRequestWithContext(ctx, "POST", reqURL, strings.NewReader(postData))
-		if err != nil {
-			return nil, err
-		}
+// region Settings parsing
 
-		req.Header.Set("User-Agent", p.UserAgent)
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		req.Header.Set("Accept", "*/*")
-		req.Header.Set("Accept-Language", "en-US,en;q=0.9,ru;q=0.8")
-		req.Header.Set("Origin", "https://id.vk.ru")
-		req.Header.Set("Referer", "https://id.vk.ru/")
-		req.Header.Set("sec-ch-ua", p.SecChUA())
-		req.Header.Set("sec-ch-ua-mobile", "?0")
-		req.Header.Set("sec-ch-ua-platform", p.SecChUAPlatform())
-		req.Header.Set("Sec-Fetch-Site", "same-site")
-		req.Header.Set("Sec-Fetch-Mode", "cors")
-		req.Header.Set("Sec-Fetch-Dest", "empty")
-		req.Header.Set("DNT", "1")
-		req.Header.Set("Sec-GPC", "1")
-
-		httpResp, err := client.Do(req)
-		if err != nil {
-			return nil, fmt.Errorf("POST %s: %w", method, err)
-		}
-		defer httpResp.Body.Close()
-
-		body, err := io.ReadAll(httpResp.Body)
-		if err != nil {
-			return nil, err
-		}
-
-		preview := string(body)
-		if len(preview) > 300 {
-			preview = preview[:300] + "..."
-		}
-		log.Printf("[Captcha] %s: %s", method, preview)
-
-		var resp map[string]interface{}
-		if err := json.Unmarshal(body, &resp); err != nil {
-			return nil, fmt.Errorf("unmarshal %s: %w", method, err)
-		}
-		return resp, nil
+func parseCaptchaSettingsFromHTML(html string) (*captchaSettingsResponse, error) {
+	initRe := regexp.MustCompile(`(?s)window\.init\s*=\s*(\{.*?})\s*;\s*window\.lang`)
+	initMatch := initRe.FindStringSubmatch(html)
+	if len(initMatch) < 2 {
+		return &captchaSettingsResponse{SettingsByType: make(map[string]string)}, nil
 	}
 
-	domain := "vk.com"
-	baseParams := fmt.Sprintf("session_token=%s&domain=%s&adFp=&access_token=",
-		url.QueryEscape(sessionToken), url.QueryEscape(domain))
-
-	// 1/4: settings — initialise the captcha session
-	log.Printf("[Captcha] 1/4: captchaNotRobot.settings")
-	_, err := vkReq("captchaNotRobot.settings", baseParams)
-	if err != nil {
-		return "", fmt.Errorf("settings: %w", err)
+	var initPayload struct {
+		Data struct {
+			ShowCaptchaType string      `json:"show_captcha_type"`
+			CaptchaSettings interface{} `json:"captcha_settings"`
+		} `json:"data"`
 	}
-	time.Sleep(time.Duration(100+mathrand.Intn(100)) * time.Millisecond)
-
-	// 2/4: componentDone — send randomised browser fingerprint
-	log.Printf("[Captcha] 2/4: captchaNotRobot.componentDone")
-	browserFp := fmt.Sprintf("%016x%016x", mathrand.Int63(), mathrand.Int63())
-
-	resolutions := [][]int{{1920, 1080}, {1366, 768}, {1440, 900}, {1536, 864}, {2560, 1440}}
-	res := resolutions[mathrand.Intn(len(resolutions))]
-	screenW, screenH := res[0], res[1]
-	cores := []int{4, 8, 12, 16}[mathrand.Intn(4)]
-	ram := []int{4, 8, 16, 32}[mathrand.Intn(4)]
-	dpr := []float64{1, 1.25, 1.5, 2}[mathrand.Intn(4)]
-
-	deviceMap := map[string]interface{}{
-		"screenWidth":             screenW,
-		"screenHeight":            screenH,
-		"screenAvailWidth":        screenW,
-		"screenAvailHeight":       screenH - 40,
-		"innerWidth":              screenW - mathrand.Intn(100),
-		"innerHeight":             screenH - 100 - mathrand.Intn(50),
-		"devicePixelRatio":        dpr,
-		"language":                "en-US",
-		"languages":               []string{"en-US", "en", "ru"},
-		"webdriver":               false,
-		"hardwareConcurrency":     cores,
-		"deviceMemory":            ram,
-		"connectionEffectiveType": "4g",
-		"notificationsPermission": "default",
-	}
-	deviceBytes, _ := json.Marshal(deviceMap)
-
-	componentDoneData := baseParams + fmt.Sprintf("&browser_fp=%s&device=%s",
-		browserFp, url.QueryEscape(string(deviceBytes)))
-
-	_, err = vkReq("captchaNotRobot.componentDone", componentDoneData)
-	if err != nil {
-		return "", fmt.Errorf("componentDone: %w", err)
+	if err := json.Unmarshal([]byte(initMatch[1]), &initPayload); err != nil {
+		return nil, fmt.Errorf("parse window.init captcha data: %w", err)
 	}
 
-	// Reference HAR timing: 1950–3200ms before check submission
-	checkDelay := time.Duration(1950+mathrand.Intn(1250)) * time.Millisecond
-	log.Printf("[Captcha] Waiting %s before check...", checkDelay.Round(time.Millisecond))
-	select {
-	case <-time.After(checkDelay):
-	case <-ctx.Done():
-		return "", ctx.Err()
-	}
-
-	// 3/4: check — submit PoW hash and sensor data
-	log.Printf("[Captcha] 3/4: captchaNotRobot.check")
-
-	// Cursor points with Unix-ms timestamps (VK validates the T field)
-	type CursorPoint struct {
-		X int   `json:"x"`
-		Y int   `json:"y"`
-		T int64 `json:"t"`
-	}
-	now := time.Now().UnixMilli()
-	startX := screenW/2 + mathrand.Intn(200) - 100
-	startY := screenH/2 + mathrand.Intn(200) - 100
-	pointCount := 4 + mathrand.Intn(5)
-	cursor := make([]CursorPoint, pointCount)
-	for i := 0; i < pointCount; i++ {
-		cursor[i] = CursorPoint{
-			X: startX,
-			Y: startY,
-			T: now - int64((pointCount-i)*500) - int64(mathrand.Intn(100)),
-		}
-		startX += mathrand.Intn(30) - 15
-		startY += mathrand.Intn(30) - 15
-	}
-	cursorBytes, _ := json.Marshal(cursor)
-
-	// Realistic downlink samples (8–12 Mbps with small jitter)
-	baseDownlink := 8.0 + mathrand.Float64()*4.0
-	downlinkParts := make([]string, 7)
-	for i := range downlinkParts {
-		downlinkParts[i] = fmt.Sprintf("%.1f", baseDownlink+mathrand.Float64()*0.5-0.25)
-	}
-	connectionDownlink := "[" + strings.Join(downlinkParts, ",") + "]"
-
-	answer := base64.StdEncoding.EncodeToString([]byte("{}"))
-
-	checkData := baseParams + fmt.Sprintf(
-		"&accelerometer=%s&gyroscope=%s&motion=%s&cursor=%s&taps=%s&connectionRtt=%s&connectionDownlink=%s"+
-			"&browser_fp=%s&hash=%s&answer=%s&debug_info=%s",
-		url.QueryEscape("[]"),
-		url.QueryEscape("[]"),
-		url.QueryEscape("[]"),
-		url.QueryEscape(string(cursorBytes)),
-		url.QueryEscape("[]"),
-		url.QueryEscape("[]"),
-		url.QueryEscape(connectionDownlink),
-		browserFp,
-		hash,
-		answer,
-		debugInfoHash,
-	)
-
-	checkResp, err := vkReq("captchaNotRobot.check", checkData)
-	if err != nil {
-		return "", fmt.Errorf("check: %w", err)
-	}
-
-	respObj, ok := checkResp["response"].(map[string]interface{})
-	if !ok {
-		return "", fmt.Errorf("check: unexpected response shape: %v", checkResp)
-	}
-
-	status, _ := respObj["status"].(string)
-	if status != "OK" {
-		return "", fmt.Errorf("check: status=%q full=%v", status, checkResp)
-	}
-
-	successToken, ok := respObj["success_token"].(string)
-	if !ok || successToken == "" {
-		return "", fmt.Errorf("check: no success_token in response")
-	}
-
-	time.Sleep(200 * time.Millisecond)
-
-	// 4/4: endSession — non-fatal cleanup
-	log.Printf("[Captcha] 4/4: captchaNotRobot.endSession")
-	_, _ = vkReq("captchaNotRobot.endSession", baseParams)
-
-	return successToken, nil
+	return parseCaptchaSettingsResponse(map[string]interface{}{
+		"response": map[string]interface{}{
+			"show_captcha_type": initPayload.Data.ShowCaptchaType,
+			"captcha_settings":  initPayload.Data.CaptchaSettings,
+		},
+	})
 }
+
+func parseCaptchaSettingsResponse(resp map[string]interface{}) (*captchaSettingsResponse, error) {
+	respObj, ok := resp["response"].(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("invalid settings response: %v", resp)
+	}
+
+	settings := &captchaSettingsResponse{
+		SettingsByType: make(map[string]string),
+	}
+	settings.ShowCaptchaType, _ = respObj["show_captcha_type"].(string)
+
+	rawSettings, ok := expandCaptchaSettings(respObj["captcha_settings"])
+	if !ok {
+		return settings, nil
+	}
+
+	for _, rawItem := range rawSettings {
+		item, ok := rawItem.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		captchaType, _ := item["type"].(string)
+		if captchaType == "" {
+			continue
+		}
+
+		normalized, err := normalizeCaptchaSettings(item["settings"])
+		if err != nil {
+			return nil, fmt.Errorf("invalid captcha_settings for %s: %w", captchaType, err)
+		}
+
+		settings.SettingsByType[captchaType] = normalized
+	}
+
+	return settings, nil
+}
+
+func parseCaptchaCheckResultResponse(resp map[string]interface{}) (*captchaCheckResult, error) {
+	respObj, ok := resp["response"].(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("invalid check response: %v", resp)
+	}
+
+	result := &captchaCheckResult{}
+	result.Status, _ = respObj["status"].(string)
+	result.SuccessToken, _ = respObj["success_token"].(string)
+	result.ShowCaptchaType, _ = respObj["show_captcha_type"].(string)
+	if result.Status == "" {
+		return nil, fmt.Errorf("check status missing: %v", resp)
+	}
+
+	return result, nil
+}
+
+func mergeCaptchaSettings(primary *captchaSettingsResponse, fallback *captchaSettingsResponse) *captchaSettingsResponse {
+	if primary == nil {
+		return cloneCaptchaSettings(fallback)
+	}
+	if primary.SettingsByType == nil {
+		primary.SettingsByType = make(map[string]string)
+	}
+	if fallback == nil {
+		return primary
+	}
+	if primary.ShowCaptchaType == "" {
+		primary.ShowCaptchaType = fallback.ShowCaptchaType
+	}
+	for captchaType, settings := range fallback.SettingsByType {
+		if _, exists := primary.SettingsByType[captchaType]; !exists {
+			primary.SettingsByType[captchaType] = settings
+		}
+	}
+	return primary
+}
+
+func cloneCaptchaSettings(src *captchaSettingsResponse) *captchaSettingsResponse {
+	if src == nil {
+		return nil
+	}
+
+	cloned := &captchaSettingsResponse{
+		ShowCaptchaType: src.ShowCaptchaType,
+		SettingsByType:  make(map[string]string, len(src.SettingsByType)),
+	}
+	for captchaType, settings := range src.SettingsByType {
+		cloned.SettingsByType[captchaType] = settings
+	}
+	return cloned
+}
+
+func expandCaptchaSettings(raw interface{}) ([]interface{}, bool) {
+	switch value := raw.(type) {
+	case nil:
+		return nil, false
+	case []interface{}:
+		return value, true
+	case map[string]interface{}:
+		items := make([]interface{}, 0, len(value))
+		for captchaType, settings := range value {
+			items = append(items, map[string]interface{}{
+				"type":     captchaType,
+				"settings": settings,
+			})
+		}
+		return items, true
+	case string:
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			return nil, false
+		}
+
+		var items []interface{}
+		if err := json.Unmarshal([]byte(trimmed), &items); err == nil {
+			return items, true
+		}
+
+		var mapping map[string]interface{}
+		if err := json.Unmarshal([]byte(trimmed), &mapping); err == nil {
+			return expandCaptchaSettings(mapping)
+		}
+	}
+
+	return nil, false
+}
+
+func normalizeCaptchaSettings(raw interface{}) (string, error) {
+	switch value := raw.(type) {
+	case nil:
+		return "", nil
+	case string:
+		return value, nil
+	default:
+		data, err := json.Marshal(value)
+		if err != nil {
+			return "", err
+		}
+		return string(data), nil
+	}
+}
+
+// endregion

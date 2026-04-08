@@ -186,8 +186,7 @@ func getVKCredsOnce(link, clientID, clientSecret string) (resUser string, resPas
 	name := generateName()
 	escapedName := neturl.QueryEscape(name)
 
-	ua := profile.UserAgent
-	logUA := ua
+	logUA := profile.UserAgent
 	if len(logUA) > 60 {
 		logUA = logUA[:60]
 	}
@@ -207,8 +206,15 @@ func getVKCredsOnce(link, clientID, clientSecret string) (resUser string, resPas
 		if err != nil {
 			return nil, err
 		}
-		req.Header.Add("User-Agent", ua)
-		req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
+		applyBrowserHeaders(req, profile)
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set("Accept", "*/*")
+		req.Header.Set("Origin", "https://vk.ru")
+		req.Header.Set("Referer", "https://vk.ru/")
+		req.Header.Set("Sec-Fetch-Site", "same-site")
+		req.Header.Set("Sec-Fetch-Mode", "cors")
+		req.Header.Set("Sec-Fetch-Dest", "empty")
+		req.Header.Set("Priority", "u=1, i")
 
 		httpResp, err := client.Do(req)
 		if err != nil {
@@ -258,11 +264,10 @@ func getVKCredsOnce(link, clientID, clientSecret string) (resUser string, resPas
 	step2Data := fmt.Sprintf("vk_join_link=https://vk.com/call/join/%s&name=%s&access_token=%s",
 		link, escapedName, token1)
 
-	const maxCaptchaRounds = 3
-	const maxPoWRetries = 3
+	const maxCaptchaAttempts = 3
 	var token2 string
 
-	for round := 0; round < maxCaptchaRounds; round++ {
+	for attempt := 0; attempt <= maxCaptchaAttempts; attempt++ {
 		resp, err = doRequest(step2Data, step2URL)
 		if err != nil {
 			return "", "", "", fmt.Errorf("step2: %w", err)
@@ -279,6 +284,10 @@ func getVKCredsOnce(link, clientID, clientSecret string) (resUser string, resPas
 			return "", "", "", fmt.Errorf("vk API error: %v", errObj)
 		}
 
+		if attempt == maxCaptchaAttempts {
+			return "", "", "", fmt.Errorf("captcha failed after %d attempts", maxCaptchaAttempts)
+		}
+
 		captchaErr := ParseVkCaptchaError(errObj)
 		if !captchaErr.IsCaptchaError() {
 			return "", "", "", fmt.Errorf("error 14 but no redirect_uri/session_token: %v", errObj)
@@ -290,7 +299,7 @@ func getVKCredsOnce(link, clientID, clientSecret string) (resUser string, resPas
 		savedWebViewToken = ""
 		savedWebViewTokenMu.Unlock()
 		if presolvedToken != "" {
-			log.Printf("vk: using pre-solved WebView token, skipping PoW")
+			log.Printf("vk: using pre-solved WebView token, skipping captcha solve")
 			if captchaErr.CaptchaAttempt == "" || captchaErr.CaptchaAttempt == "0" {
 				captchaErr.CaptchaAttempt = "1"
 			}
@@ -305,75 +314,43 @@ func getVKCredsOnce(link, clientID, clientSecret string) (resUser string, resPas
 			continue
 		}
 
-		log.Printf("vk: captcha required (round %d/%d), starting PoW", round+1, maxCaptchaRounds)
+		log.Printf("[Captcha] Attempt %d/%d: solving...", attempt+1, maxCaptchaAttempts)
 
-		// Up to 3 PoW attempts; on failure fetch a fresh captcha URL and retry.
-		currentCaptcha := captchaErr
-		var powToken string
-		var powErr error
+		successToken, solveErr := solveVkCaptcha(context.Background(), captchaErr, profile)
+		if solveErr != nil {
+			log.Printf("[Captcha] Attempt %d/%d failed: %v", attempt+1, maxCaptchaAttempts, solveErr)
 
-		for powTry := 1; powTry <= maxPoWRetries; powTry++ {
-			log.Printf("vk: PoW attempt %d/%d", powTry, maxPoWRetries)
-			powCtx, powCancel := context.WithTimeout(context.Background(), 30*time.Second)
-			powToken, powErr = solveVkCaptcha(powCtx, currentCaptcha)
-			powCancel()
-			if powErr == nil {
-				break
-			}
-			log.Printf("vk: PoW %d/%d failed: %v", powTry, maxPoWRetries, powErr)
-			if powTry < maxPoWRetries {
-				// Request a fresh captcha session before the next attempt
+			// Automatic solver failed — fall back to WebView if handler is set.
+			if proxyCaptchaFunc != nil && captchaErr.RedirectUri != "" {
+				// Request a fresh captcha URL so the WebView gets a clean session.
 				freshData := fmt.Sprintf("vk_join_link=https://vk.com/call/join/%s&name=%s&access_token=%s",
 					link, escapedName, token1)
-				freshResp, freshErr := doRequest(freshData, step2URL)
-				if freshErr == nil {
+				freshCaptcha := captchaErr
+				if freshResp, freshErr := doRequest(freshData, step2URL); freshErr == nil {
 					if fe, ok := freshResp["error"].(map[string]interface{}); ok {
-						freshCaptcha := ParseVkCaptchaError(fe)
-						if freshCaptcha.IsCaptchaError() {
-							currentCaptcha = freshCaptcha
-							log.Printf("vk: refreshed captcha for PoW retry %d", powTry+1)
+						fc := ParseVkCaptchaError(fe)
+						if fc.IsCaptchaError() {
+							freshCaptcha = fc
 						}
 					}
 				}
-			}
-		}
 
-		if powErr != nil {
-			// All automatic PoW attempts failed — fall back to WebView if a handler is set.
-			// The currentCaptcha.RedirectUri was already visited by fetchPowInput during the
-			// last PoW attempt, so VK would return a stale page. Request a fresh captcha URL
-			// that has never been fetched, so the WebView gets a clean session.
-			freshData := fmt.Sprintf("vk_join_link=https://vk.com/call/join/%s&name=%s&access_token=%s",
-				link, escapedName, token1)
-			if freshResp, freshErr := doRequest(freshData, step2URL); freshErr == nil {
-				if fe, ok := freshResp["error"].(map[string]interface{}); ok {
-					freshCaptcha := ParseVkCaptchaError(fe)
-					if freshCaptcha.IsCaptchaError() {
-						log.Printf("vk: refreshed captcha URI for WebView")
-						currentCaptcha = freshCaptcha
-					}
-				}
-			}
-			if proxyCaptchaFunc != nil && currentCaptcha.RedirectUri != "" {
-				log.Printf("vk: PoW exhausted, triggering fail-fast for WebView: %s", currentCaptcha.RedirectUri)
-				cURI := C.CString(currentCaptcha.RedirectUri)
+				log.Printf("vk: triggering fail-fast for WebView: %s", freshCaptcha.RedirectUri)
+				cURI := C.CString(freshCaptcha.RedirectUri)
 				C.call_proxy_captcha(proxyCaptchaFunc, proxyCaptchaCtx, cURI)
 				C.free(unsafe.Pointer(cURI))
 
-				// Fail fast: signal ProxyWaitReady to return 2 so the VPN goes to
-				// "disconnected" while internet is still accessible, allowing the
-				// WebView to load. The app will reconnect with the solved token.
 				select {
 				case proxyCaptchaNeeded <- struct{}{}:
 				default:
 				}
 				return "", "", "", fmt.Errorf("captcha: WebView needed (fail-fast)")
 			}
-			return "", "", "", fmt.Errorf("captcha: all %d PoW attempts failed: %w", maxPoWRetries, powErr)
+			return "", "", "", fmt.Errorf("captcha solve error: %v", solveErr)
 		}
 
-		if currentCaptcha.CaptchaAttempt == "" || currentCaptcha.CaptchaAttempt == "0" {
-			currentCaptcha.CaptchaAttempt = "1"
+		if captchaErr.CaptchaAttempt == "" || captchaErr.CaptchaAttempt == "0" {
+			captchaErr.CaptchaAttempt = "1"
 		}
 
 		step2Data = fmt.Sprintf(
@@ -381,8 +358,8 @@ func getVKCredsOnce(link, clientID, clientSecret string) (resUser string, resPas
 				"&captcha_key=&captcha_sid=%s&is_sound_captcha=0&success_token=%s"+
 				"&captcha_ts=%s&captcha_attempt=%s",
 			link, escapedName, token1,
-			currentCaptcha.CaptchaSid, neturl.QueryEscape(powToken),
-			currentCaptcha.CaptchaTs, currentCaptcha.CaptchaAttempt,
+			captchaErr.CaptchaSid, neturl.QueryEscape(successToken),
+			captchaErr.CaptchaTs, captchaErr.CaptchaAttempt,
 		)
 	}
 

@@ -62,6 +62,13 @@ var proxyCaptchaCtx unsafe.Pointer
 // Buffered so Swift can fire-and-forget without blocking.
 var captchaSolutionCh = make(chan string, 1)
 
+// proxyCaptchaNeeded signals ProxyWaitReady to return 2 (fail-fast flow).
+var proxyCaptchaNeeded = make(chan struct{}, 1)
+
+// savedWebViewToken is set by ProxySetCaptchaToken before StartProxy.
+var savedWebViewToken string
+var savedWebViewTokenMu sync.Mutex
+
 //export ProxySetLogger
 func ProxySetLogger(context unsafe.Pointer, loggerFn C.proxy_logger_fn_t) {
 	proxyLoggerCtx = context
@@ -90,11 +97,25 @@ func ProxySolveCaptcha(cToken *C.char) {
 	}
 }
 
+// ProxySetCaptchaToken stores a pre-solved success_token before calling StartProxy.
+// Go uses it on the next connection attempt to skip PoW entirely.
+//
+//export ProxySetCaptchaToken
+func ProxySetCaptchaToken(cToken *C.char) {
+	savedWebViewTokenMu.Lock()
+	defer savedWebViewTokenMu.Unlock()
+	savedWebViewToken = C.GoString(cToken)
+}
+
+// ProxyWaitReady returns: 0 = timeout, 1 = ready, 2 = captcha_needed (fail-fast).
+//
 //export ProxyWaitReady
 func ProxyWaitReady(timeoutMs C.int) C.int {
 	select {
 	case <-proxyReady:
 		return 1
+	case <-proxyCaptchaNeeded:
+		return 2
 	case <-time.After(time.Duration(timeoutMs) * time.Millisecond):
 		return 0
 	}
@@ -263,7 +284,28 @@ func getVKCredsOnce(link, clientID, clientSecret string) (resUser string, resPas
 			return "", "", "", fmt.Errorf("error 14 but no redirect_uri/session_token: %v", errObj)
 		}
 
-		log.Printf("vk: captcha required (round %d/%d)", round+1, maxCaptchaRounds)
+		// Check if a pre-solved token is available from a previous WebView session.
+		savedWebViewTokenMu.Lock()
+		presolvedToken := savedWebViewToken
+		savedWebViewToken = ""
+		savedWebViewTokenMu.Unlock()
+		if presolvedToken != "" {
+			log.Printf("vk: using pre-solved WebView token, skipping PoW")
+			if captchaErr.CaptchaAttempt == "" || captchaErr.CaptchaAttempt == "0" {
+				captchaErr.CaptchaAttempt = "1"
+			}
+			step2Data = fmt.Sprintf(
+				"vk_join_link=https://vk.com/call/join/%s&name=%s&access_token=%s"+
+					"&captcha_key=&captcha_sid=%s&is_sound_captcha=0&success_token=%s"+
+					"&captcha_ts=%s&captcha_attempt=%s",
+				link, escapedName, token1,
+				captchaErr.CaptchaSid, neturl.QueryEscape(presolvedToken),
+				captchaErr.CaptchaTs, captchaErr.CaptchaAttempt,
+			)
+			continue
+		}
+
+		log.Printf("vk: captcha required (round %d/%d), starting PoW", round+1, maxCaptchaRounds)
 
 		// Up to 3 PoW attempts; on failure fetch a fresh captcha URL and retry.
 		currentCaptcha := captchaErr
@@ -313,35 +355,19 @@ func getVKCredsOnce(link, clientID, clientSecret string) (resUser string, resPas
 				}
 			}
 			if proxyCaptchaFunc != nil && currentCaptcha.RedirectUri != "" {
-				log.Printf("vk: PoW exhausted, requesting WebView for %s", currentCaptcha.RedirectUri)
+				log.Printf("vk: PoW exhausted, triggering fail-fast for WebView: %s", currentCaptcha.RedirectUri)
 				cURI := C.CString(currentCaptcha.RedirectUri)
 				C.call_proxy_captcha(proxyCaptchaFunc, proxyCaptchaCtx, cURI)
 				C.free(unsafe.Pointer(cURI))
 
-				// Wait up to 5 minutes for the user to solve captcha in the WebView.
-				webCtx, webCancel := context.WithTimeout(context.Background(), 5*time.Minute)
-				var webViewToken string
+				// Fail fast: signal ProxyWaitReady to return 2 so the VPN goes to
+				// "disconnected" while internet is still accessible, allowing the
+				// WebView to load. The app will reconnect with the solved token.
 				select {
-				case webViewToken = <-captchaSolutionCh:
-					log.Printf("vk: received WebView token (%d chars)", len(webViewToken))
-				case <-webCtx.Done():
-					webCancel()
-					return "", "", "", fmt.Errorf("captcha: WebView timeout (5 min)")
+				case proxyCaptchaNeeded <- struct{}{}:
+				default:
 				}
-				webCancel()
-
-				if currentCaptcha.CaptchaAttempt == "" || currentCaptcha.CaptchaAttempt == "0" {
-					currentCaptcha.CaptchaAttempt = "1"
-				}
-				step2Data = fmt.Sprintf(
-					"vk_join_link=https://vk.com/call/join/%s&name=%s&access_token=%s"+
-						"&captcha_key=&captcha_sid=%s&is_sound_captcha=0&success_token=%s"+
-						"&captcha_ts=%s&captcha_attempt=%s",
-					link, escapedName, token1,
-					currentCaptcha.CaptchaSid, neturl.QueryEscape(webViewToken),
-					currentCaptcha.CaptchaTs, currentCaptcha.CaptchaAttempt,
-				)
-				continue
+				return "", "", "", fmt.Errorf("captcha: WebView needed (fail-fast)")
 			}
 			return "", "", "", fmt.Errorf("captcha: all %d PoW attempts failed: %w", maxPoWRetries, powErr)
 		}
@@ -851,6 +877,10 @@ func poolCreds(f getCredsFunc, poolSize int) getCredsFunc {
 func StartProxy(cLink *C.char, cPeerAddr *C.char, cLocalAddr *C.char, cN C.int) {
 	select {
 	case <-proxyReady:
+	default:
+	}
+	select {
+	case <-proxyCaptchaNeeded:
 	default:
 	}
 

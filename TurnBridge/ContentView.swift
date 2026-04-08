@@ -603,14 +603,20 @@ struct ContentView: View {
         }
     }
 
-    /// Sends the success_token obtained from the captcha WebView back to the Network Extension.
+    /// Called when the captcha WebView yields a success_token.
+    /// VPN is disconnected at this point — save token to UserDefaults and auto-reconnect.
     private func submitCaptchaToken(_ token: String) {
         showCaptchaSheet = false
         captchaURL = nil
-        NETunnelProviderManager.loadAllFromPreferences { managers, _ in
-            guard let session = managers?.first?.connection as? NETunnelProviderSession,
-                  let data = "captcha:\(token)".data(using: .utf8) else { return }
-            try? session.sendProviderMessage(data) { _ in }
+        if let groupID = SharedLogger.appGroupID,
+           let defaults = UserDefaults(suiteName: groupID) {
+            defaults.set(token, forKey: "tb_captcha_success_token")
+            defaults.removeObject(forKey: "tb_captcha_url")
+            defaults.synchronize()
+        }
+        SharedLogger.info("Captcha solved — auto-reconnecting")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            self.toggleTunnel()
         }
     }
 
@@ -665,6 +671,9 @@ struct ContentView: View {
                 startStatsTimer()
             } else if newStatus == .disconnected {
                 connTimer.stop(); stopStatsTimer()
+                if prev == .connecting || prev == .reasserting {
+                    checkCaptchaRequest()
+                }
             }
         }
     }

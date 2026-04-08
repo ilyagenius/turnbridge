@@ -26,6 +26,7 @@ private let goProxyCaptchaCallback: @convention(c) (UnsafeMutableRawPointer?, Un
 enum PacketTunnelProviderError: String, Error {
     case invalidProtocolConfiguration
     case cantParseWgQuickConfig
+    case captchaRequired
 }
 
 private let goProxyCLoggerCallback: @convention(c) (UnsafeMutableRawPointer?, Int32, UnsafePointer<CChar>?) -> Void = { context, level, messageCStr in
@@ -106,6 +107,17 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         ProxySetLogger(nil, goProxyCLoggerCallback)
         ProxySetCaptchaHandler(nil, goProxyCaptchaCallback)
 
+        // Pass pre-solved captcha token if available from a previous WebView solve.
+        if let groupID = SharedLogger.appGroupID,
+           let defaults = UserDefaults(suiteName: groupID),
+           let savedToken = defaults.string(forKey: "tb_captcha_success_token"), !savedToken.isEmpty {
+            sharedLogger.log("[Captcha] Applying saved token for this connection")
+            SharedLogger.info("Applying saved captcha token", source: .tunnel)
+            savedToken.withCString { ProxySetCaptchaToken($0) }
+            defaults.removeObject(forKey: "tb_captcha_success_token")
+            defaults.synchronize()
+        }
+
         DispatchQueue.global(qos: .userInteractive).async {
             StartProxy(vkLink, peerAddr, listenAddr, nValue)
         }
@@ -118,6 +130,13 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 sharedLogger.error("Proxy transport timeout!")
                 SharedLogger.error("Proxy transport timeout (45s)", source: .tunnel)
                 completionHandler(PacketTunnelProviderError.invalidProtocolConfiguration)
+                return
+            }
+
+            if ready == 2 {
+                sharedLogger.log("[Captcha] Captcha required — failing tunnel for WebView")
+                SharedLogger.info("Captcha required, aborting tunnel start", source: .tunnel)
+                completionHandler(PacketTunnelProviderError.captchaRequired)
                 return
             }
 

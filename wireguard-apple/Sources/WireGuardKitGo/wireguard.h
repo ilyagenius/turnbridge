@@ -43,5 +43,8 @@ typedef void(*proxy_captcha_fn_t)(void *context, const char *redirectUri);
 extern void ProxySetCaptchaHandler(void *context, proxy_captcha_fn_t fn);
 // Call this from Swift with the success_token extracted from the WebView.
 extern void ProxySolveCaptcha(const char *successToken);
+// Set a pre-solved token before StartProxy; Go will use it to skip PoW.
+extern void ProxySetCaptchaToken(const char *successToken);
+// Returns: 0=timeout, 1=ready, 2=captcha_needed (fail-fast).
 
 #endif

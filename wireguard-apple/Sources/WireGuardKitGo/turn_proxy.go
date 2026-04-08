@@ -364,7 +364,7 @@ func getVKCredsOnce(link, clientID, clientSecret string) (resUser string, resPas
 	}
 
 	if token2 == "" {
-		return "", "", "", fmt.Errorf("step2: failed after %d captcha rounds", maxCaptchaRounds)
+		return "", "", "", fmt.Errorf("step2: failed after %d captcha attempts", maxCaptchaAttempts)
 	}
 
 	// Step 3: OK.ru anonymous login

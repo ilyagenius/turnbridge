@@ -52,7 +52,10 @@ import (
 
 var proxyLoggerFunc C.proxy_logger_fn_t
 var proxyLoggerCtx unsafe.Pointer
+
+var proxyMu sync.Mutex
 var proxyCancel context.CancelFunc
+var proxyDone chan struct{}
 
 // Captcha WebView fallback — set by the Swift side on startup.
 var proxyCaptchaFunc C.proxy_captcha_fn_t
@@ -424,7 +427,7 @@ func dtlsFunc(ctx context.Context, conn net.PacketConn, peer *net.UDPAddr) (net.
 	return dtlsConn, nil
 }
 
-func oneDtlsConnection(ctx context.Context, peer *net.UDPAddr, listenConn net.PacketConn, connchan chan<- net.PacketConn, okchan chan<- struct{}, singleShot bool, c1 chan<- error) {
+func oneDtlsConnection(ctx context.Context, peer *net.UDPAddr, listenConn net.PacketConn, connchan chan<- net.PacketConn, okchan chan<- struct{}, singleShot bool, sessionID []byte, streamID byte, c1 chan<- error) {
 	var err error = nil
 	defer func() { c1 <- err }()
 	dtlsctx, dtlscancel := context.WithCancel(ctx)
@@ -461,6 +464,21 @@ func oneDtlsConnection(ctx context.Context, peer *net.UDPAddr, listenConn net.Pa
 		log.Printf("Closed DTLS connection\n")
 	}()
 	log.Printf("Established DTLS connection!\n")
+
+	// proxy_v2: send 17-byte session header [16 UUID + 1 stream ID]
+	if len(sessionID) == 16 {
+		dtlsConn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		idBuf := make([]byte, 17)
+		copy(idBuf[:16], sessionID)
+		idBuf[16] = streamID
+		if _, err1 := dtlsConn.Write(idBuf); err1 != nil {
+			err = fmt.Errorf("failed to send session ID: %s", err1)
+			return
+		}
+		dtlsConn.SetWriteDeadline(time.Time{})
+		log.Printf("Sent session ID (stream %d)\n", streamID)
+	}
+
 	select {
 	case proxyReady <- struct{}{}:
 	default:
@@ -482,27 +500,18 @@ func oneDtlsConnection(ctx context.Context, peer *net.UDPAddr, listenConn net.Pa
 		dtlsConn.SetDeadline(time.Now())
 	})
 	var addr atomic.Value
+	// Hot path: no select on ctx — deadline is set via context.AfterFunc above
 	go func() {
 		defer wg.Done()
 		defer dtlscancel()
-		buf := make([]byte, 1600)
+		buf := make([]byte, 65535)
 		for {
-			select {
-			case <-dtlsctx.Done():
-				return
-			default:
-			}
 			n, addr1, err1 := listenConn.ReadFrom(buf)
 			if err1 != nil {
-				log.Printf("Failed: %s", err1)
 				return
 			}
-
 			addr.Store(addr1)
-
-			_, err1 = dtlsConn.Write(buf[:n])
-			if err1 != nil {
-				log.Printf("Failed: %s", err1)
+			if _, err1 = dtlsConn.Write(buf[:n]); err1 != nil {
 				return
 			}
 		}
@@ -511,27 +520,17 @@ func oneDtlsConnection(ctx context.Context, peer *net.UDPAddr, listenConn net.Pa
 	go func() {
 		defer wg.Done()
 		defer dtlscancel()
-		buf := make([]byte, 1600)
+		buf := make([]byte, 65535)
 		for {
-			select {
-			case <-dtlsctx.Done():
-				return
-			default:
-			}
 			n, err1 := dtlsConn.Read(buf)
 			if err1 != nil {
-				log.Printf("Failed: %s", err1)
 				return
 			}
 			addr1, ok := addr.Load().(net.Addr)
 			if !ok {
-				log.Printf("Failed: no listener ip")
 				return
 			}
-
-			_, err1 = listenConn.WriteTo(buf[:n], addr1)
-			if err1 != nil {
-				log.Printf("Failed: %s", err1)
+			if _, err1 = listenConn.WriteTo(buf[:n], addr1); err1 != nil {
 				return
 			}
 		}
@@ -600,6 +599,9 @@ func oneTurnConnection(ctx context.Context, turnParams *turnParams, peer *net.UD
 			err = fmt.Errorf("failed to connect to TURN server: %s", err2)
 			return
 		}
+		// Increase socket buffers for throughput
+		conn.SetReadBuffer(2 * 1024 * 1024)  // 2MB
+		conn.SetWriteBuffer(2 * 1024 * 1024) // 2MB
 		defer func() {
 			if err1 = conn.Close(); err1 != nil {
 				err = fmt.Errorf("failed to close TURN server connection: %s", err1)
@@ -636,7 +638,7 @@ func oneTurnConnection(ctx context.Context, turnParams *turnParams, peer *net.UD
 		Username:               user,
 		Password:               pass,
 		RequestedAddressFamily: addrFamily,
-		LoggerFactory:          logging.NewDefaultLoggerFactory(),
+		LoggerFactory:          logging.NewDefaultLoggerFactory(), // TODO: suppress in production to avoid topology leaks
 	}
 
 	client, err1 := turn.NewClient(cfg)
@@ -693,7 +695,7 @@ func oneTurnConnection(ctx context.Context, turnParams *turnParams, peer *net.UD
 	go func() {
 		defer wg.Done()
 		defer turncancel()
-		buf := make([]byte, 1600)
+		buf := make([]byte, 65535)
 		for {
 			select {
 			case <-turnctx.Done():
@@ -720,7 +722,7 @@ func oneTurnConnection(ctx context.Context, turnParams *turnParams, peer *net.UD
 	go func() {
 		defer wg.Done()
 		defer turncancel()
-		buf := make([]byte, 1600)
+		buf := make([]byte, 65535)
 		for {
 			select {
 			case <-turnctx.Done():
@@ -755,14 +757,14 @@ func oneTurnConnection(ctx context.Context, turnParams *turnParams, peer *net.UD
 	}
 }
 
-func oneDtlsConnectionLoop(ctx context.Context, peer *net.UDPAddr, listenConnChan <-chan net.PacketConn, connchan chan<- net.PacketConn, okchan chan<- struct{}, singleShot bool) {
+func oneDtlsConnectionLoop(ctx context.Context, peer *net.UDPAddr, listenConnChan <-chan net.PacketConn, connchan chan<- net.PacketConn, okchan chan<- struct{}, singleShot bool, sessionID []byte, streamID byte) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case listenConn := <-listenConnChan:
 			c := make(chan error)
-			go oneDtlsConnection(ctx, peer, listenConn, connchan, okchan, singleShot, c)
+			go oneDtlsConnection(ctx, peer, listenConn, connchan, okchan, singleShot, sessionID, streamID, c)
 			if err := <-c; err != nil {
 				log.Printf("%s", err)
 			}
@@ -871,8 +873,33 @@ func StartProxy(cLink *C.char, cPeerAddr *C.char, cLocalAddr *C.char, cN C.int) 
 	udp := true
 
 	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+
+	proxyMu.Lock()
 	proxyCancel = cancel
-	defer cancel()
+	proxyDone = done
+	proxyMu.Unlock()
+
+	defer func() {
+		cancel()
+		proxyMu.Lock()
+		if proxyDone == done {
+			proxyDone = nil
+		}
+		proxyMu.Unlock()
+		close(done)
+	}()
+
+	if n < 1 {
+		n = 5
+	}
+	if n > 32 {
+		n = 32
+	}
+
+	// proxy_v2: generate session ID (16-byte UUID) for stream aggregation
+	sessionUUID := uuid.New()
+	sessionID, _ := sessionUUID.MarshalBinary()
 
 	// Detect provider from link
 	isWB := strings.Contains(link, "wb") || strings.Contains(link, "wildberries") || strings.Contains(link, "stream.wb")
@@ -946,6 +973,11 @@ func StartProxy(cLink *C.char, cPeerAddr *C.char, cLocalAddr *C.char, cN C.int) 
 		log.Printf("Failed to listen: %s", err)
 		return
 	}
+	// Increase local socket buffers
+	if udpConn, ok := listenConn.(*net.UDPConn); ok {
+		udpConn.SetReadBuffer(2 * 1024 * 1024)  // 2MB
+		udpConn.SetWriteBuffer(2 * 1024 * 1024) // 2MB
+	}
 
 	context.AfterFunc(ctx, func() {
 		if closeErr := listenConn.Close(); closeErr != nil {
@@ -970,7 +1002,7 @@ func StartProxy(cLink *C.char, cPeerAddr *C.char, cLocalAddr *C.char, cN C.int) 
 	connchan := make(chan net.PacketConn)
 
 	wg1.Go(func() {
-		oneDtlsConnectionLoop(ctx, peer, listenConnChan, connchan, okchan, params.singleShot)
+		oneDtlsConnectionLoop(ctx, peer, listenConnChan, connchan, okchan, params.singleShot, sessionID, 0)
 	})
 	wg1.Go(func() {
 		oneTurnConnectionLoop(ctx, params, peer, connchan, t)
@@ -983,8 +1015,9 @@ func StartProxy(cLink *C.char, cPeerAddr *C.char, cLocalAddr *C.char, cN C.int) 
 
 	for i := 0; i < n-1; i++ {
 		cChan := make(chan net.PacketConn)
+		streamIdx := byte(i + 1)
 		wg1.Go(func() {
-			oneDtlsConnectionLoop(ctx, peer, listenConnChan, cChan, nil, params.singleShot)
+			oneDtlsConnectionLoop(ctx, peer, listenConnChan, cChan, nil, params.singleShot, sessionID, streamIdx)
 		})
 		wg1.Go(func() {
 			oneTurnConnectionLoop(ctx, params, peer, cChan, t)
@@ -997,9 +1030,32 @@ func StartProxy(cLink *C.char, cPeerAddr *C.char, cLocalAddr *C.char, cN C.int) 
 
 //export StopProxy
 func StopProxy() {
-	if proxyCancel != nil {
-		proxyCancel()
-		proxyCancel = nil
+	proxyMu.Lock()
+	c := proxyCancel
+	proxyCancel = nil
+	proxyMu.Unlock()
+	if c != nil {
+		c()
 		log.Println("Proxy gracefully stopped")
 	}
+}
+
+//export StopProxySync
+func StopProxySync() {
+	proxyMu.Lock()
+	c := proxyCancel
+	proxyCancel = nil
+	done := proxyDone
+	proxyMu.Unlock()
+	if c != nil {
+		c()
+	}
+	if done != nil {
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			log.Println("StopProxySync: timed out waiting for proxy cleanup")
+		}
+	}
+	log.Println("Proxy stopped and cleaned up")
 }

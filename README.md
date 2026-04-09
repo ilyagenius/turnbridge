@@ -10,28 +10,34 @@
 
 ## Провайдеры туннелей
 
-### FUCK MAX
+### MAX
 
 Туннелирует WireGuard через **TURN-серверы MAX** (ex VK Teams / ICQ New, инфраструктура OK.ru) — трафик выглядит как видеозвонок MAX.
 
-Добавлено:
-- Полный auth flow через WebSocket API + Calls API 
-- Получение TURN credentials  
-- CreatePermission на произвольные IP — разрешён
-- Бейдж провайдера в приложении (cyan)
-
 `turn` = `max:<login_token>|<join_link_id>`, `peer` = адрес VPS с портом (например `158.160.x.x:56000`).
 
-> **Server component required.**
-> Для получения `login_token` требуется серверный компонент аутентификации (SMS через OneMe API).
-> `join_link_id` — создать звонок в MAX → скопировать ссылку → часть после `/joincall/`.
-> Контакт: **[@ilkl34](https://t.me/ilkl34)** в Telegram.
+> **Требуется серверный компонент.** Контакт: **[@ilkl34](https://t.me/ilkl34)**
 
 ### VK (ВКонтакте)
 
 Оригинальный бэкенд — через **TURN-серверы ВКонтакте** по DTLS. Трафик выглядит как видеозвонок VK.
 
 `turn` = ссылка на VK-звонок, `peer` = адрес VPS с портом vk-turn-proxy.
+
+**Мульти-руминг (multi-room):** VK ограничивает пропускную способность ~10 Mbps на комнату. Для увеличения скорости можно передать несколько ссылок на разные VK-звонки через запятую:
+
+```
+https://vk.com/call/join/LINK_1,https://vk.com/call/join/LINK_2,https://vk.com/call/join/LINK_3
+```
+
+Стримы автоматически распределяются round-robin по комнатам. 3 комнаты × ~10 Mbps = ~30 Mbps.
+
+**Серверная часть:** для VK используется [vk-turn-proxy-v2](https://github.com/ilyagenius/vk-turn-proxy-v2) — DTLS-прокси с агрегацией сессий. Все стримы от одного клиента объединяются в один UDP-сокет к WireGuard.
+
+```bash
+docker build -t vk-proxy-v2 .
+docker run -d --restart always --network host vk-proxy-v2 -listen 0.0.0.0:56000 -connect 127.0.0.1:51820
+```
 
 ### Wildberries (WB)
 
@@ -98,6 +104,7 @@
 | Бэкенд | `turn` | `peer` |
 |--------|--------|--------|
 | VK | `https://vk.com/call/join/LINK_ID` | `IP_VPS:56000` |
+| VK (multi-room) | `LINK_1,LINK_2,LINK_3` | `IP_VPS:56000` |
 | WB | `wb` | `IP_VPS:56000` |
 | Jazz | `https://salutejazz.ru/calls/ROOM_ID?psw=PASSWORD` | *(пусто)* |
 | Telemost | `https://telemost.yandex.ru/j/ROOM_ID` | *(пусто)* |

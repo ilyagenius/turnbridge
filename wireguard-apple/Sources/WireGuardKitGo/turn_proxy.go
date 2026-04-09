@@ -52,7 +52,10 @@ import (
 
 var proxyLoggerFunc C.proxy_logger_fn_t
 var proxyLoggerCtx unsafe.Pointer
+
+var proxyMu sync.Mutex
 var proxyCancel context.CancelFunc
+var proxyDone chan struct{}
 
 // Captcha WebView fallback — set by the Swift side on startup.
 var proxyCaptchaFunc C.proxy_captcha_fn_t
@@ -61,6 +64,13 @@ var proxyCaptchaCtx unsafe.Pointer
 // captchaSolutionCh receives the success_token from ProxySolveCaptcha (Swift → Go).
 // Buffered so Swift can fire-and-forget without blocking.
 var captchaSolutionCh = make(chan string, 1)
+
+// proxyCaptchaNeeded signals ProxyWaitReady to return 2 (fail-fast flow).
+var proxyCaptchaNeeded = make(chan struct{}, 1)
+
+// savedWebViewToken is set by ProxySetCaptchaToken before StartProxy.
+var savedWebViewToken string
+var savedWebViewTokenMu sync.Mutex
 
 //export ProxySetLogger
 func ProxySetLogger(context unsafe.Pointer, loggerFn C.proxy_logger_fn_t) {
@@ -90,11 +100,25 @@ func ProxySolveCaptcha(cToken *C.char) {
 	}
 }
 
+// ProxySetCaptchaToken stores a pre-solved success_token before calling StartProxy.
+// Go uses it on the next connection attempt to skip PoW entirely.
+//
+//export ProxySetCaptchaToken
+func ProxySetCaptchaToken(cToken *C.char) {
+	savedWebViewTokenMu.Lock()
+	defer savedWebViewTokenMu.Unlock()
+	savedWebViewToken = C.GoString(cToken)
+}
+
+// ProxyWaitReady returns: 0 = timeout, 1 = ready, 2 = captcha_needed (fail-fast).
+//
 //export ProxyWaitReady
 func ProxyWaitReady(timeoutMs C.int) C.int {
 	select {
 	case <-proxyReady:
 		return 1
+	case <-proxyCaptchaNeeded:
+		return 2
 	case <-time.After(time.Duration(timeoutMs) * time.Millisecond):
 		return 0
 	}
@@ -165,8 +189,7 @@ func getVKCredsOnce(link, clientID, clientSecret string) (resUser string, resPas
 	name := generateName()
 	escapedName := neturl.QueryEscape(name)
 
-	ua := profile.UserAgent
-	logUA := ua
+	logUA := profile.UserAgent
 	if len(logUA) > 60 {
 		logUA = logUA[:60]
 	}
@@ -186,8 +209,15 @@ func getVKCredsOnce(link, clientID, clientSecret string) (resUser string, resPas
 		if err != nil {
 			return nil, err
 		}
-		req.Header.Add("User-Agent", ua)
-		req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
+		applyBrowserHeaders(req, profile)
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set("Accept", "*/*")
+		req.Header.Set("Origin", "https://vk.ru")
+		req.Header.Set("Referer", "https://vk.ru/")
+		req.Header.Set("Sec-Fetch-Site", "same-site")
+		req.Header.Set("Sec-Fetch-Mode", "cors")
+		req.Header.Set("Sec-Fetch-Dest", "empty")
+		req.Header.Set("Priority", "u=1, i")
 
 		httpResp, err := client.Do(req)
 		if err != nil {
@@ -237,11 +267,10 @@ func getVKCredsOnce(link, clientID, clientSecret string) (resUser string, resPas
 	step2Data := fmt.Sprintf("vk_join_link=https://vk.com/call/join/%s&name=%s&access_token=%s",
 		link, escapedName, token1)
 
-	const maxCaptchaRounds = 3
-	const maxPoWRetries = 3
+	const maxCaptchaAttempts = 3
 	var token2 string
 
-	for round := 0; round < maxCaptchaRounds; round++ {
+	for attempt := 0; attempt <= maxCaptchaAttempts; attempt++ {
 		resp, err = doRequest(step2Data, step2URL)
 		if err != nil {
 			return "", "", "", fmt.Errorf("step2: %w", err)
@@ -258,96 +287,73 @@ func getVKCredsOnce(link, clientID, clientSecret string) (resUser string, resPas
 			return "", "", "", fmt.Errorf("vk API error: %v", errObj)
 		}
 
+		if attempt == maxCaptchaAttempts {
+			return "", "", "", fmt.Errorf("captcha failed after %d attempts", maxCaptchaAttempts)
+		}
+
 		captchaErr := ParseVkCaptchaError(errObj)
 		if !captchaErr.IsCaptchaError() {
 			return "", "", "", fmt.Errorf("error 14 but no redirect_uri/session_token: %v", errObj)
 		}
 
-		log.Printf("vk: captcha required (round %d/%d)", round+1, maxCaptchaRounds)
-
-		// Up to 3 PoW attempts; on failure fetch a fresh captcha URL and retry.
-		currentCaptcha := captchaErr
-		var powToken string
-		var powErr error
-
-		for powTry := 1; powTry <= maxPoWRetries; powTry++ {
-			log.Printf("vk: PoW attempt %d/%d", powTry, maxPoWRetries)
-			powCtx, powCancel := context.WithTimeout(context.Background(), 30*time.Second)
-			powToken, powErr = solveVkCaptcha(powCtx, currentCaptcha)
-			powCancel()
-			if powErr == nil {
-				break
+		// Check if a pre-solved token is available from a previous WebView session.
+		savedWebViewTokenMu.Lock()
+		presolvedToken := savedWebViewToken
+		savedWebViewToken = ""
+		savedWebViewTokenMu.Unlock()
+		if presolvedToken != "" {
+			log.Printf("vk: using pre-solved WebView token, skipping captcha solve")
+			if captchaErr.CaptchaAttempt == "" || captchaErr.CaptchaAttempt == "0" {
+				captchaErr.CaptchaAttempt = "1"
 			}
-			log.Printf("vk: PoW %d/%d failed: %v", powTry, maxPoWRetries, powErr)
-			if powTry < maxPoWRetries {
-				// Request a fresh captcha session before the next attempt
+			step2Data = fmt.Sprintf(
+				"vk_join_link=https://vk.com/call/join/%s&name=%s&access_token=%s"+
+					"&captcha_key=&captcha_sid=%s&is_sound_captcha=0&success_token=%s"+
+					"&captcha_ts=%s&captcha_attempt=%s",
+				link, escapedName, token1,
+				captchaErr.CaptchaSid, neturl.QueryEscape(presolvedToken),
+				captchaErr.CaptchaTs, captchaErr.CaptchaAttempt,
+			)
+			continue
+		}
+
+		log.Printf("[Captcha] Attempt %d/%d: solving...", attempt+1, maxCaptchaAttempts)
+
+		successToken, solveErr := solveVkCaptcha(context.Background(), captchaErr, profile)
+		if solveErr != nil {
+			log.Printf("[Captcha] Attempt %d/%d failed: %v", attempt+1, maxCaptchaAttempts, solveErr)
+
+			// Automatic solver failed — fall back to WebView if handler is set.
+			if proxyCaptchaFunc != nil && captchaErr.RedirectUri != "" {
+				// Request a fresh captcha URL so the WebView gets a clean session.
 				freshData := fmt.Sprintf("vk_join_link=https://vk.com/call/join/%s&name=%s&access_token=%s",
 					link, escapedName, token1)
-				freshResp, freshErr := doRequest(freshData, step2URL)
-				if freshErr == nil {
+				freshCaptcha := captchaErr
+				if freshResp, freshErr := doRequest(freshData, step2URL); freshErr == nil {
 					if fe, ok := freshResp["error"].(map[string]interface{}); ok {
-						freshCaptcha := ParseVkCaptchaError(fe)
-						if freshCaptcha.IsCaptchaError() {
-							currentCaptcha = freshCaptcha
-							log.Printf("vk: refreshed captcha for PoW retry %d", powTry+1)
+						fc := ParseVkCaptchaError(fe)
+						if fc.IsCaptchaError() {
+							freshCaptcha = fc
 						}
 					}
 				}
-			}
-		}
 
-		if powErr != nil {
-			// All automatic PoW attempts failed — fall back to WebView if a handler is set.
-			// The currentCaptcha.RedirectUri was already visited by fetchPowInput during the
-			// last PoW attempt, so VK would return a stale page. Request a fresh captcha URL
-			// that has never been fetched, so the WebView gets a clean session.
-			freshData := fmt.Sprintf("vk_join_link=https://vk.com/call/join/%s&name=%s&access_token=%s",
-				link, escapedName, token1)
-			if freshResp, freshErr := doRequest(freshData, step2URL); freshErr == nil {
-				if fe, ok := freshResp["error"].(map[string]interface{}); ok {
-					freshCaptcha := ParseVkCaptchaError(fe)
-					if freshCaptcha.IsCaptchaError() {
-						log.Printf("vk: refreshed captcha URI for WebView")
-						currentCaptcha = freshCaptcha
-					}
-				}
-			}
-			if proxyCaptchaFunc != nil && currentCaptcha.RedirectUri != "" {
-				log.Printf("vk: PoW exhausted, requesting WebView for %s", currentCaptcha.RedirectUri)
-				cURI := C.CString(currentCaptcha.RedirectUri)
+				log.Printf("vk: triggering fail-fast for WebView: %s", freshCaptcha.RedirectUri)
+				cURI := C.CString(freshCaptcha.RedirectUri)
 				C.call_proxy_captcha(proxyCaptchaFunc, proxyCaptchaCtx, cURI)
 				C.free(unsafe.Pointer(cURI))
 
-				// Wait up to 5 minutes for the user to solve captcha in the WebView.
-				webCtx, webCancel := context.WithTimeout(context.Background(), 5*time.Minute)
-				var webViewToken string
 				select {
-				case webViewToken = <-captchaSolutionCh:
-					log.Printf("vk: received WebView token (%d chars)", len(webViewToken))
-				case <-webCtx.Done():
-					webCancel()
-					return "", "", "", fmt.Errorf("captcha: WebView timeout (5 min)")
+				case proxyCaptchaNeeded <- struct{}{}:
+				default:
 				}
-				webCancel()
-
-				if currentCaptcha.CaptchaAttempt == "" || currentCaptcha.CaptchaAttempt == "0" {
-					currentCaptcha.CaptchaAttempt = "1"
-				}
-				step2Data = fmt.Sprintf(
-					"vk_join_link=https://vk.com/call/join/%s&name=%s&access_token=%s"+
-						"&captcha_key=&captcha_sid=%s&is_sound_captcha=0&success_token=%s"+
-						"&captcha_ts=%s&captcha_attempt=%s",
-					link, escapedName, token1,
-					currentCaptcha.CaptchaSid, neturl.QueryEscape(webViewToken),
-					currentCaptcha.CaptchaTs, currentCaptcha.CaptchaAttempt,
-				)
-				continue
+				return "", "", "", fmt.Errorf("captcha: WebView needed (fail-fast)")
 			}
-			return "", "", "", fmt.Errorf("captcha: all %d PoW attempts failed: %w", maxPoWRetries, powErr)
+			return "", "", "", fmt.Errorf("captcha solve error: %v", solveErr)
 		}
 
-		if currentCaptcha.CaptchaAttempt == "" || currentCaptcha.CaptchaAttempt == "0" {
-			currentCaptcha.CaptchaAttempt = "1"
+		if captchaErr.CaptchaAttempt == "" || captchaErr.CaptchaAttempt == "0" {
+			captchaErr.CaptchaAttempt = "1"
 		}
 
 		step2Data = fmt.Sprintf(
@@ -355,13 +361,13 @@ func getVKCredsOnce(link, clientID, clientSecret string) (resUser string, resPas
 				"&captcha_key=&captcha_sid=%s&is_sound_captcha=0&success_token=%s"+
 				"&captcha_ts=%s&captcha_attempt=%s",
 			link, escapedName, token1,
-			currentCaptcha.CaptchaSid, neturl.QueryEscape(powToken),
-			currentCaptcha.CaptchaTs, currentCaptcha.CaptchaAttempt,
+			captchaErr.CaptchaSid, neturl.QueryEscape(successToken),
+			captchaErr.CaptchaTs, captchaErr.CaptchaAttempt,
 		)
 	}
 
 	if token2 == "" {
-		return "", "", "", fmt.Errorf("step2: failed after %d captcha rounds", maxCaptchaRounds)
+		return "", "", "", fmt.Errorf("step2: failed after %d captcha attempts", maxCaptchaAttempts)
 	}
 
 	// Step 3: OK.ru anonymous login
@@ -421,7 +427,7 @@ func dtlsFunc(ctx context.Context, conn net.PacketConn, peer *net.UDPAddr) (net.
 	return dtlsConn, nil
 }
 
-func oneDtlsConnection(ctx context.Context, peer *net.UDPAddr, listenConn net.PacketConn, connchan chan<- net.PacketConn, okchan chan<- struct{}, singleShot bool, c1 chan<- error) {
+func oneDtlsConnection(ctx context.Context, peer *net.UDPAddr, inChan <-chan []byte, wgAddr *atomic.Value, listenConn net.PacketConn, connchan chan<- net.PacketConn, okchan chan<- struct{}, singleShot bool, sessionID []byte, streamID byte, c1 chan<- error) {
 	var err error = nil
 	defer func() { c1 <- err }()
 	dtlsctx, dtlscancel := context.WithCancel(ctx)
@@ -455,9 +461,24 @@ func oneDtlsConnection(ctx context.Context, peer *net.UDPAddr, listenConn net.Pa
 			err = fmt.Errorf("failed to close DTLS connection: %s", closeErr)
 			return
 		}
-		log.Printf("Closed DTLS connection\n")
+		log.Printf("Closed DTLS connection (stream %d)\n", streamID)
 	}()
-	log.Printf("Established DTLS connection!\n")
+	log.Printf("Established DTLS connection (stream %d)!\n", streamID)
+
+	// proxy_v2: send 17-byte session header [16 UUID + 1 stream ID]
+	if len(sessionID) == 16 {
+		dtlsConn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		idBuf := make([]byte, 17)
+		copy(idBuf[:16], sessionID)
+		idBuf[16] = streamID
+		if _, err1 := dtlsConn.Write(idBuf); err1 != nil {
+			err = fmt.Errorf("failed to send session ID: %s", err1)
+			return
+		}
+		dtlsConn.SetWriteDeadline(time.Time{})
+		log.Printf("Sent session ID (stream %d)\n", streamID)
+	}
+
 	select {
 	case proxyReady <- struct{}{}:
 	default:
@@ -475,67 +496,49 @@ func oneDtlsConnection(ctx context.Context, peer *net.UDPAddr, listenConn net.Pa
 	wg := sync.WaitGroup{}
 	wg.Add(2)
 	context.AfterFunc(dtlsctx, func() {
-		listenConn.SetDeadline(time.Now())
 		dtlsConn.SetDeadline(time.Now())
 	})
-	var addr atomic.Value
+
+	// Upstream: inChan (from dispatcher) → dtlsConn
 	go func() {
 		defer wg.Done()
 		defer dtlscancel()
-		buf := make([]byte, 1600)
 		for {
 			select {
 			case <-dtlsctx.Done():
 				return
-			default:
-			}
-			n, addr1, err1 := listenConn.ReadFrom(buf)
-			if err1 != nil {
-				log.Printf("Failed: %s", err1)
-				return
-			}
-
-			addr.Store(addr1)
-
-			_, err1 = dtlsConn.Write(buf[:n])
-			if err1 != nil {
-				log.Printf("Failed: %s", err1)
-				return
+			case pkt, ok := <-inChan:
+				if !ok {
+					return
+				}
+				if _, err1 := dtlsConn.Write(pkt); err1 != nil {
+					return
+				}
 			}
 		}
 	}()
 
+	// Downstream: dtlsConn → listenConn (WriteTo is safe on shared socket)
 	go func() {
 		defer wg.Done()
 		defer dtlscancel()
-		buf := make([]byte, 1600)
+		buf := make([]byte, 65535)
 		for {
-			select {
-			case <-dtlsctx.Done():
-				return
-			default:
-			}
 			n, err1 := dtlsConn.Read(buf)
 			if err1 != nil {
-				log.Printf("Failed: %s", err1)
 				return
 			}
-			addr1, ok := addr.Load().(net.Addr)
+			addr1, ok := wgAddr.Load().(net.Addr)
 			if !ok {
-				log.Printf("Failed: no listener ip")
-				return
+				continue // no WG peer yet, drop
 			}
-
-			_, err1 = listenConn.WriteTo(buf[:n], addr1)
-			if err1 != nil {
-				log.Printf("Failed: %s", err1)
+			if _, err1 = listenConn.WriteTo(buf[:n], addr1); err1 != nil {
 				return
 			}
 		}
 	}()
 
 	wg.Wait()
-	listenConn.SetDeadline(time.Time{})
 	dtlsConn.SetDeadline(time.Time{})
 }
 
@@ -597,6 +600,9 @@ func oneTurnConnection(ctx context.Context, turnParams *turnParams, peer *net.UD
 			err = fmt.Errorf("failed to connect to TURN server: %s", err2)
 			return
 		}
+		// Increase socket buffers for throughput
+		conn.SetReadBuffer(2 * 1024 * 1024)  // 2MB
+		conn.SetWriteBuffer(2 * 1024 * 1024) // 2MB
 		defer func() {
 			if err1 = conn.Close(); err1 != nil {
 				err = fmt.Errorf("failed to close TURN server connection: %s", err1)
@@ -633,7 +639,7 @@ func oneTurnConnection(ctx context.Context, turnParams *turnParams, peer *net.UD
 		Username:               user,
 		Password:               pass,
 		RequestedAddressFamily: addrFamily,
-		LoggerFactory:          logging.NewDefaultLoggerFactory(),
+		LoggerFactory:          logging.NewDefaultLoggerFactory(), // TODO: suppress in production to avoid topology leaks
 	}
 
 	client, err1 := turn.NewClient(cfg)
@@ -690,7 +696,7 @@ func oneTurnConnection(ctx context.Context, turnParams *turnParams, peer *net.UD
 	go func() {
 		defer wg.Done()
 		defer turncancel()
-		buf := make([]byte, 1600)
+		buf := make([]byte, 65535)
 		for {
 			select {
 			case <-turnctx.Done():
@@ -717,7 +723,7 @@ func oneTurnConnection(ctx context.Context, turnParams *turnParams, peer *net.UD
 	go func() {
 		defer wg.Done()
 		defer turncancel()
-		buf := make([]byte, 1600)
+		buf := make([]byte, 65535)
 		for {
 			select {
 			case <-turnctx.Done():
@@ -752,17 +758,17 @@ func oneTurnConnection(ctx context.Context, turnParams *turnParams, peer *net.UD
 	}
 }
 
-func oneDtlsConnectionLoop(ctx context.Context, peer *net.UDPAddr, listenConnChan <-chan net.PacketConn, connchan chan<- net.PacketConn, okchan chan<- struct{}, singleShot bool) {
+func oneDtlsConnectionLoop(ctx context.Context, peer *net.UDPAddr, inChan <-chan []byte, wgAddr *atomic.Value, listenConn net.PacketConn, connchan chan<- net.PacketConn, okchan chan<- struct{}, singleShot bool, sessionID []byte, streamID byte) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case listenConn := <-listenConnChan:
-			c := make(chan error)
-			go oneDtlsConnection(ctx, peer, listenConn, connchan, okchan, singleShot, c)
-			if err := <-c; err != nil {
-				log.Printf("%s", err)
-			}
+		default:
+		}
+		c := make(chan error)
+		go oneDtlsConnection(ctx, peer, inChan, wgAddr, listenConn, connchan, okchan, singleShot, sessionID, streamID, c)
+		if err := <-c; err != nil {
+			log.Printf("stream %d: %s", streamID, err)
 		}
 	}
 }
@@ -853,6 +859,10 @@ func StartProxy(cLink *C.char, cPeerAddr *C.char, cLocalAddr *C.char, cN C.int) 
 	case <-proxyReady:
 	default:
 	}
+	select {
+	case <-proxyCaptchaNeeded:
+	default:
+	}
 
 	link := C.GoString(cLink)
 	peerAddrStr := C.GoString(cPeerAddr)
@@ -864,13 +874,39 @@ func StartProxy(cLink *C.char, cPeerAddr *C.char, cLocalAddr *C.char, cN C.int) 
 	udp := true
 
 	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+
+	proxyMu.Lock()
 	proxyCancel = cancel
-	defer cancel()
+	proxyDone = done
+	proxyMu.Unlock()
+
+	defer func() {
+		cancel()
+		proxyMu.Lock()
+		if proxyDone == done {
+			proxyDone = nil
+		}
+		proxyMu.Unlock()
+		close(done)
+	}()
+
+	if n < 1 {
+		n = 5
+	}
+	if n > 32 {
+		n = 32
+	}
+
+	// proxy_v2: generate session ID (16-byte UUID) for stream aggregation
+	sessionUUID := uuid.New()
+	sessionID, _ := sessionUUID.MarshalBinary()
 
 	// Detect provider from link
 	isWB := strings.Contains(link, "wb") || strings.Contains(link, "wildberries") || strings.Contains(link, "stream.wb")
 	isJazz := isJazzSignalingLink(link)
 	isTelemost := isTelemostLink(link)
+	isMAX := strings.HasPrefix(link, "max:")
 
 	var credFunc getCredsFunc
 	var peer *net.UDPAddr
@@ -898,6 +934,16 @@ func StartProxy(cLink *C.char, cPeerAddr *C.char, cLocalAddr *C.char, cN C.int) 
 			log.Printf("Telemost WebRTC failed: %v", err)
 		}
 		return
+	} else if isMAX {
+		log.Printf("Using MAX TURN provider")
+		credFunc = getCredsMAX
+		link = strings.TrimPrefix(link, "max:")
+		port = "" // use port from TURN server response
+		peer, err = net.ResolveUDPAddr("udp", peerAddrStr)
+		if err != nil {
+			log.Printf("Resolve UDP error: %v", err)
+			return
+		}
 	} else {
 		log.Printf("Using VK TURN provider")
 		credFunc = getCreds
@@ -906,27 +952,49 @@ func StartProxy(cLink *C.char, cPeerAddr *C.char, cLocalAddr *C.char, cN C.int) 
 			log.Printf("Resolve UDP error: %v", err)
 			return
 		}
-		parts := strings.Split(link, "join/")
-		link = parts[len(parts)-1]
-		if idx := strings.IndexAny(link, "/?#"); idx != -1 {
-			link = link[:idx]
+	}
+
+	// Multi-room support: comma-separated VK links → separate turnParams per room
+	var paramsList []*turnParams
+	if credFunc == getCreds {
+		vkLinks := strings.Split(link, ",")
+		streamsPerRoom := (n + len(vkLinks) - 1) / len(vkLinks)
+		for _, l := range vkLinks {
+			l = strings.TrimSpace(l)
+			parts := strings.Split(l, "join/")
+			l = parts[len(parts)-1]
+			if idx := strings.IndexAny(l, "/?#"); idx != -1 {
+				l = l[:idx]
+			}
+			paramsList = append(paramsList, &turnParams{
+				host:     host,
+				port:     port,
+				link:     l,
+				udp:      udp,
+				getCreds: poolCreds(credFunc, streamsPerRoom),
+			})
 		}
+		log.Printf("VK: %d room(s), ~%d streams per room", len(paramsList), streamsPerRoom)
+	} else {
+		paramsList = []*turnParams{{
+			host:       host,
+			port:       port,
+			link:       link,
+			udp:        udp,
+			getCreds:   poolCreds(credFunc, n),
+			onAllocate: onAllocate,
+		}}
 	}
 
-	params := &turnParams{
-		host:       host,
-		port:       port,
-		link:       link,
-		udp:        udp,
-		getCreds:   poolCreds(credFunc, n),
-		onAllocate: onAllocate,
-	}
-
-	listenConnChan := make(chan net.PacketConn)
 	listenConn, err := net.ListenPacket("udp", localAddrStr)
 	if err != nil {
 		log.Printf("Failed to listen: %s", err)
 		return
+	}
+	// Increase local socket buffers
+	if udpConn, ok := listenConn.(*net.UDPConn); ok {
+		udpConn.SetReadBuffer(2 * 1024 * 1024)  // 2MB
+		udpConn.SetWriteBuffer(2 * 1024 * 1024) // 2MB
 	}
 
 	context.AfterFunc(ctx, func() {
@@ -935,13 +1003,37 @@ func StartProxy(cLink *C.char, cPeerAddr *C.char, cLocalAddr *C.char, cN C.int) 
 		}
 	})
 
+	// Create per-stream channels for round-robin packet dispatch
+	inChans := make([]chan []byte, n)
+	for i := range inChans {
+		inChans[i] = make(chan []byte, 64)
+	}
+	var wgAddr atomic.Value
+
+	// Dispatcher: single reader on listenConn, round-robin to streams
 	go func() {
+		buf := make([]byte, 65535)
+		idx := 0
 		for {
-			select {
-			case <-ctx.Done():
+			nr, addr, err := listenConn.ReadFrom(buf)
+			if err != nil {
 				return
-			case listenConnChan <- listenConn:
 			}
+			wgAddr.Store(addr)
+			pkt := make([]byte, nr)
+			copy(pkt, buf[:nr])
+			// Round-robin: try each stream, send to first available
+			for attempts := 0; attempts < n; attempts++ {
+				select {
+				case inChans[idx%n] <- pkt:
+					idx++
+					goto dispatched
+				default:
+					idx++ // stream full, try next
+				}
+			}
+			// All streams full — drop packet (backpressure)
+		dispatched:
 		}
 	}()
 
@@ -952,10 +1044,10 @@ func StartProxy(cLink *C.char, cPeerAddr *C.char, cLocalAddr *C.char, cN C.int) 
 	connchan := make(chan net.PacketConn)
 
 	wg1.Go(func() {
-		oneDtlsConnectionLoop(ctx, peer, listenConnChan, connchan, okchan, params.singleShot)
+		oneDtlsConnectionLoop(ctx, peer, inChans[0], &wgAddr, listenConn, connchan, okchan, paramsList[0].singleShot, sessionID, 0)
 	})
 	wg1.Go(func() {
-		oneTurnConnectionLoop(ctx, params, peer, connchan, t)
+		oneTurnConnectionLoop(ctx, paramsList[0], peer, connchan, t)
 	})
 
 	select {
@@ -965,23 +1057,48 @@ func StartProxy(cLink *C.char, cPeerAddr *C.char, cLocalAddr *C.char, cN C.int) 
 
 	for i := 0; i < n-1; i++ {
 		cChan := make(chan net.PacketConn)
+		streamIdx := byte(i + 1)
+		p := paramsList[int(streamIdx)%len(paramsList)]
 		wg1.Go(func() {
-			oneDtlsConnectionLoop(ctx, peer, listenConnChan, cChan, nil, params.singleShot)
+			oneDtlsConnectionLoop(ctx, peer, inChans[streamIdx], &wgAddr, listenConn, cChan, nil, p.singleShot, sessionID, streamIdx)
 		})
 		wg1.Go(func() {
-			oneTurnConnectionLoop(ctx, params, peer, cChan, t)
+			oneTurnConnectionLoop(ctx, p, peer, cChan, t)
 		})
 	}
 
-	log.Printf("Proxy started on %s", localAddrStr)
+	log.Printf("Proxy started on %s with %d streams across %d room(s)", localAddrStr, n, len(paramsList))
 	wg1.Wait()
 }
 
 //export StopProxy
 func StopProxy() {
-	if proxyCancel != nil {
-		proxyCancel()
-		proxyCancel = nil
+	proxyMu.Lock()
+	c := proxyCancel
+	proxyCancel = nil
+	proxyMu.Unlock()
+	if c != nil {
+		c()
 		log.Println("Proxy gracefully stopped")
 	}
+}
+
+//export StopProxySync
+func StopProxySync() {
+	proxyMu.Lock()
+	c := proxyCancel
+	proxyCancel = nil
+	done := proxyDone
+	proxyMu.Unlock()
+	if c != nil {
+		c()
+	}
+	if done != nil {
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			log.Println("StopProxySync: timed out waiting for proxy cleanup")
+		}
+	}
+	log.Println("Proxy stopped and cleaned up")
 }

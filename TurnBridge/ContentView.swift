@@ -60,13 +60,15 @@ struct TunnelStats {
 // MARK: - Provider
 
 enum TunnelProvider {
-    case jazz, vk, wb, unknown
-    var label: String { switch self { case .jazz: return "Jazz"; case .vk: return "VK"; case .wb: return "WB"; case .unknown: return "—" } }
-    var icon: String { switch self { case .jazz: return "waveform"; case .vk: return "bubble.left.and.bubble.right"; case .wb: return "shippingbox"; case .unknown: return "questionmark.circle" } }
-    var color: Color { switch self { case .jazz: return .purple; case .vk: return .blue; case .wb: return Color(red:0.9,green:0.3,blue:0.1); case .unknown: return .secondary } }
+    case jazz, vk, wb, telemost, max, unknown
+    var label: String { switch self { case .jazz: return "Jazz"; case .vk: return "VK"; case .wb: return "WB"; case .telemost: return "Telemost"; case .max: return "MAX"; case .unknown: return "—" } }
+    var icon: String { switch self { case .jazz: return "waveform"; case .vk: return "bubble.left.and.bubble.right"; case .wb: return "shippingbox"; case .telemost: return "video"; case .max: return "message"; case .unknown: return "questionmark.circle" } }
+    var color: Color { switch self { case .jazz: return .purple; case .vk: return .blue; case .wb: return Color(red:0.9,green:0.3,blue:0.1); case .telemost: return .red; case .max: return .cyan; case .unknown: return .secondary } }
     static func detect(from link: String) -> TunnelProvider {
         let l = link.lowercased()
+        if l.hasPrefix("max:") { return .max }
         if l.contains("salutejazz") || l.contains("jazz.sber") { return .jazz }
+        if l.contains("telemost.yandex") { return .telemost }
         if l == "wb" || l.contains("wildberries") || l.contains("stream.wb") { return .wb }
         if l.contains("vk.com") || l.contains("vk.ru") { return .vk }
         return .unknown
@@ -603,14 +605,20 @@ struct ContentView: View {
         }
     }
 
-    /// Sends the success_token obtained from the captcha WebView back to the Network Extension.
+    /// Called when the captcha WebView yields a success_token.
+    /// VPN is disconnected at this point — save token to UserDefaults and auto-reconnect.
     private func submitCaptchaToken(_ token: String) {
         showCaptchaSheet = false
         captchaURL = nil
-        NETunnelProviderManager.loadAllFromPreferences { managers, _ in
-            guard let session = managers?.first?.connection as? NETunnelProviderSession,
-                  let data = "captcha:\(token)".data(using: .utf8) else { return }
-            try? session.sendProviderMessage(data) { _ in }
+        if let groupID = SharedLogger.appGroupID,
+           let defaults = UserDefaults(suiteName: groupID) {
+            defaults.set(token, forKey: "tb_captcha_success_token")
+            defaults.removeObject(forKey: "tb_captcha_url")
+            defaults.synchronize()
+        }
+        SharedLogger.info("Captcha solved — auto-reconnecting")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            self.toggleTunnel()
         }
     }
 
@@ -665,6 +673,9 @@ struct ContentView: View {
                 startStatsTimer()
             } else if newStatus == .disconnected {
                 connTimer.stop(); stopStatsTimer()
+                if prev == .connecting || prev == .reasserting {
+                    checkCaptchaRequest()
+                }
             }
         }
     }
@@ -719,18 +730,26 @@ struct ContentView: View {
 
     private func isJazzProfile(_ profile: VPNProfile) -> Bool {
         let link = profile.vkLink.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return link.hasPrefix("https://salutejazz.ru/call/") || link.hasPrefix("https://jazz.sber.ru/call/")
-            || link.hasPrefix("http://salutejazz.ru/call/") || link.hasPrefix("http://jazz.sber.ru/call/")
+        return link.contains("salutejazz") || link.contains("jazz.sber")
     }
 
     private func isTelemostProfile(_ profile: VPNProfile) -> Bool {
-        let link = profile.vkLink.trimmingCharacters(in: .whitespacesAndNewlines)
-        return link.hasPrefix("https://telemost.yandex.ru/j/") || link.hasPrefix("http://telemost.yandex.ru/j/")
+        let link = profile.vkLink.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return link.contains("telemost.yandex")
+    }
+
+    private func isWBProfile(_ profile: VPNProfile) -> Bool {
+        let link = profile.vkLink.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return link == "wb" || link.contains("wildberries") || link.contains("stream.wb")
+    }
+
+    private func profileNeedsPeerAddr(_ profile: VPNProfile) -> Bool {
+        return !isJazzProfile(profile) && !isTelemostProfile(profile) && !isWBProfile(profile)
     }
 
     private func validateConfig(_ profile: VPNProfile) -> String? {
         if profile.vkLink.isEmpty { return "Please provide a valid TURN Server URL." }
-        if profile.peerAddr.isEmpty && !isJazzProfile(profile) && !isTelemostProfile(profile) { return "Please provide a valid Peer Address." }
+        if profile.peerAddr.isEmpty && profileNeedsPeerAddr(profile) { return "Please provide a valid Peer Address." }
         if profile.listenAddr.isEmpty { return "Please provide a valid Listen Address." }
         if profile.wgQuickConfig.isEmpty { return "Please provide a valid WireGuard configuration." }
         return nil

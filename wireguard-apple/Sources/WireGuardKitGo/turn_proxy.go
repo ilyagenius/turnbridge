@@ -881,9 +881,9 @@ func StartProxy(cLink *C.char, cPeerAddr *C.char, cLocalAddr *C.char, cN C.int) 
 	localAddrStr := C.GoString(cLocalAddr)
 
 	host := ""
-	port := ""
+	port := "19302"
 	n := int(cN)
-	udp := false
+	udp := true
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})

@@ -28,7 +28,6 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -904,9 +903,7 @@ func StartProxy(cLink *C.char, cPeerAddr *C.char, cLocalAddr *C.char, cN C.int) 
 
 	// Detect provider from link
 	isWB := strings.Contains(link, "wb") || strings.Contains(link, "wildberries") || strings.Contains(link, "stream.wb")
-	isJazz := isJazzSignalingLink(link)
-	isTelemost := isTelemostLink(link)
-	isVK := !isWB && !isJazz && !isTelemost
+	isVK := !isWB
 
 	var credFunc getCredsFunc
 	var peer *net.UDPAddr
@@ -922,18 +919,6 @@ func StartProxy(cLink *C.char, cPeerAddr *C.char, cLocalAddr *C.char, cN C.int) 
 			log.Printf("Resolve UDP error: %v", err)
 			return
 		}
-	} else if isJazz {
-		log.Printf("Using Jazz WebRTC provider")
-		if err := startJazzWebRTCProxy(ctx, link, localAddrStr); err != nil && !errors.Is(err, context.Canceled) {
-			log.Printf("Jazz WebRTC failed: %v", err)
-		}
-		return
-	} else if isTelemost {
-		log.Printf("Using Telemost WebRTC provider")
-		if err := startTelemostWebRTCProxy(ctx, link, localAddrStr); err != nil && !errors.Is(err, context.Canceled) {
-			log.Printf("Telemost WebRTC failed: %v", err)
-		}
-		return
 	} else {
 		log.Printf("Using VK TURN provider")
 		credFunc = getCreds

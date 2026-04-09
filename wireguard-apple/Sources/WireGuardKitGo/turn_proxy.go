@@ -52,7 +52,10 @@ import (
 
 var proxyLoggerFunc C.proxy_logger_fn_t
 var proxyLoggerCtx unsafe.Pointer
+
+var proxyMu sync.Mutex
 var proxyCancel context.CancelFunc
+var proxyDone chan struct{}
 
 // Captcha WebView fallback — set by the Swift side on startup.
 var proxyCaptchaFunc C.proxy_captcha_fn_t
@@ -424,7 +427,7 @@ func dtlsFunc(ctx context.Context, conn net.PacketConn, peer *net.UDPAddr) (net.
 	return dtlsConn, nil
 }
 
-func oneDtlsConnection(ctx context.Context, peer *net.UDPAddr, listenConn net.PacketConn, connchan chan<- net.PacketConn, okchan chan<- struct{}, singleShot bool, c1 chan<- error) {
+func oneDtlsConnection(ctx context.Context, peer *net.UDPAddr, inChan <-chan []byte, wgAddr *atomic.Value, listenConn net.PacketConn, connchan chan<- net.PacketConn, okchan chan<- struct{}, singleShot bool, sessionID []byte, streamID byte, c1 chan<- error) {
 	var err error = nil
 	defer func() { c1 <- err }()
 	dtlsctx, dtlscancel := context.WithCancel(ctx)
@@ -458,9 +461,24 @@ func oneDtlsConnection(ctx context.Context, peer *net.UDPAddr, listenConn net.Pa
 			err = fmt.Errorf("failed to close DTLS connection: %s", closeErr)
 			return
 		}
-		log.Printf("Closed DTLS connection\n")
+		log.Printf("Closed DTLS connection (stream %d)\n", streamID)
 	}()
-	log.Printf("Established DTLS connection!\n")
+	log.Printf("Established DTLS connection (stream %d)!\n", streamID)
+
+	// proxy_v2: send 17-byte session header [16 UUID + 1 stream ID]
+	if len(sessionID) == 16 {
+		dtlsConn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		idBuf := make([]byte, 17)
+		copy(idBuf[:16], sessionID)
+		idBuf[16] = streamID
+		if _, err1 := dtlsConn.Write(idBuf); err1 != nil {
+			err = fmt.Errorf("failed to send session ID: %s", err1)
+			return
+		}
+		dtlsConn.SetWriteDeadline(time.Time{})
+		log.Printf("Sent session ID (stream %d)\n", streamID)
+	}
+
 	select {
 	case proxyReady <- struct{}{}:
 	default:
@@ -478,67 +496,49 @@ func oneDtlsConnection(ctx context.Context, peer *net.UDPAddr, listenConn net.Pa
 	wg := sync.WaitGroup{}
 	wg.Add(2)
 	context.AfterFunc(dtlsctx, func() {
-		listenConn.SetDeadline(time.Now())
 		dtlsConn.SetDeadline(time.Now())
 	})
-	var addr atomic.Value
+
+	// Upstream: inChan (from dispatcher) → dtlsConn
 	go func() {
 		defer wg.Done()
 		defer dtlscancel()
-		buf := make([]byte, 1600)
 		for {
 			select {
 			case <-dtlsctx.Done():
 				return
-			default:
-			}
-			n, addr1, err1 := listenConn.ReadFrom(buf)
-			if err1 != nil {
-				log.Printf("Failed: %s", err1)
-				return
-			}
-
-			addr.Store(addr1)
-
-			_, err1 = dtlsConn.Write(buf[:n])
-			if err1 != nil {
-				log.Printf("Failed: %s", err1)
-				return
+			case pkt, ok := <-inChan:
+				if !ok {
+					return
+				}
+				if _, err1 := dtlsConn.Write(pkt); err1 != nil {
+					return
+				}
 			}
 		}
 	}()
 
+	// Downstream: dtlsConn → listenConn (WriteTo is safe on shared socket)
 	go func() {
 		defer wg.Done()
 		defer dtlscancel()
-		buf := make([]byte, 1600)
+		buf := make([]byte, 65535)
 		for {
-			select {
-			case <-dtlsctx.Done():
-				return
-			default:
-			}
 			n, err1 := dtlsConn.Read(buf)
 			if err1 != nil {
-				log.Printf("Failed: %s", err1)
 				return
 			}
-			addr1, ok := addr.Load().(net.Addr)
+			addr1, ok := wgAddr.Load().(net.Addr)
 			if !ok {
-				log.Printf("Failed: no listener ip")
-				return
+				continue // no WG peer yet, drop
 			}
-
-			_, err1 = listenConn.WriteTo(buf[:n], addr1)
-			if err1 != nil {
-				log.Printf("Failed: %s", err1)
+			if _, err1 = listenConn.WriteTo(buf[:n], addr1); err1 != nil {
 				return
 			}
 		}
 	}()
 
 	wg.Wait()
-	listenConn.SetDeadline(time.Time{})
 	dtlsConn.SetDeadline(time.Time{})
 }
 
@@ -600,6 +600,9 @@ func oneTurnConnection(ctx context.Context, turnParams *turnParams, peer *net.UD
 			err = fmt.Errorf("failed to connect to TURN server: %s", err2)
 			return
 		}
+		// Increase socket buffers for throughput
+		conn.SetReadBuffer(2 * 1024 * 1024)  // 2MB
+		conn.SetWriteBuffer(2 * 1024 * 1024) // 2MB
 		defer func() {
 			if err1 = conn.Close(); err1 != nil {
 				err = fmt.Errorf("failed to close TURN server connection: %s", err1)
@@ -636,7 +639,7 @@ func oneTurnConnection(ctx context.Context, turnParams *turnParams, peer *net.UD
 		Username:               user,
 		Password:               pass,
 		RequestedAddressFamily: addrFamily,
-		LoggerFactory:          logging.NewDefaultLoggerFactory(),
+		LoggerFactory:          logging.NewDefaultLoggerFactory(), // TODO: suppress in production to avoid topology leaks
 	}
 
 	client, err1 := turn.NewClient(cfg)
@@ -693,7 +696,7 @@ func oneTurnConnection(ctx context.Context, turnParams *turnParams, peer *net.UD
 	go func() {
 		defer wg.Done()
 		defer turncancel()
-		buf := make([]byte, 1600)
+		buf := make([]byte, 65535)
 		for {
 			select {
 			case <-turnctx.Done():
@@ -720,7 +723,7 @@ func oneTurnConnection(ctx context.Context, turnParams *turnParams, peer *net.UD
 	go func() {
 		defer wg.Done()
 		defer turncancel()
-		buf := make([]byte, 1600)
+		buf := make([]byte, 65535)
 		for {
 			select {
 			case <-turnctx.Done():
@@ -755,17 +758,17 @@ func oneTurnConnection(ctx context.Context, turnParams *turnParams, peer *net.UD
 	}
 }
 
-func oneDtlsConnectionLoop(ctx context.Context, peer *net.UDPAddr, listenConnChan <-chan net.PacketConn, connchan chan<- net.PacketConn, okchan chan<- struct{}, singleShot bool) {
+func oneDtlsConnectionLoop(ctx context.Context, peer *net.UDPAddr, inChan <-chan []byte, wgAddr *atomic.Value, listenConn net.PacketConn, connchan chan<- net.PacketConn, okchan chan<- struct{}, singleShot bool, sessionID []byte, streamID byte) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case listenConn := <-listenConnChan:
-			c := make(chan error)
-			go oneDtlsConnection(ctx, peer, listenConn, connchan, okchan, singleShot, c)
-			if err := <-c; err != nil {
-				log.Printf("%s", err)
-			}
+		default:
+		}
+		c := make(chan error)
+		go oneDtlsConnection(ctx, peer, inChan, wgAddr, listenConn, connchan, okchan, singleShot, sessionID, streamID, c)
+		if err := <-c; err != nil {
+			log.Printf("stream %d: %s", streamID, err)
 		}
 	}
 }
@@ -871,13 +874,39 @@ func StartProxy(cLink *C.char, cPeerAddr *C.char, cLocalAddr *C.char, cN C.int) 
 	udp := true
 
 	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+
+	proxyMu.Lock()
 	proxyCancel = cancel
-	defer cancel()
+	proxyDone = done
+	proxyMu.Unlock()
+
+	defer func() {
+		cancel()
+		proxyMu.Lock()
+		if proxyDone == done {
+			proxyDone = nil
+		}
+		proxyMu.Unlock()
+		close(done)
+	}()
+
+	if n < 1 {
+		n = 5
+	}
+	if n > 32 {
+		n = 32
+	}
+
+	// proxy_v2: generate session ID (16-byte UUID) for stream aggregation
+	sessionUUID := uuid.New()
+	sessionID, _ := sessionUUID.MarshalBinary()
 
 	// Detect provider from link
 	isWB := strings.Contains(link, "wb") || strings.Contains(link, "wildberries") || strings.Contains(link, "stream.wb")
 	isJazz := isJazzSignalingLink(link)
 	isTelemost := isTelemostLink(link)
+	isVK := !isWB && !isJazz && !isTelemost
 
 	var credFunc getCredsFunc
 	var peer *net.UDPAddr
@@ -913,27 +942,49 @@ func StartProxy(cLink *C.char, cPeerAddr *C.char, cLocalAddr *C.char, cN C.int) 
 			log.Printf("Resolve UDP error: %v", err)
 			return
 		}
-		parts := strings.Split(link, "join/")
-		link = parts[len(parts)-1]
-		if idx := strings.IndexAny(link, "/?#"); idx != -1 {
-			link = link[:idx]
+	}
+
+	// Multi-room support: comma-separated VK links → separate turnParams per room
+	var paramsList []*turnParams
+	if isVK {
+		vkLinks := strings.Split(link, ",")
+		streamsPerRoom := (n + len(vkLinks) - 1) / len(vkLinks)
+		for _, l := range vkLinks {
+			l = strings.TrimSpace(l)
+			parts := strings.Split(l, "join/")
+			l = parts[len(parts)-1]
+			if idx := strings.IndexAny(l, "/?#"); idx != -1 {
+				l = l[:idx]
+			}
+			paramsList = append(paramsList, &turnParams{
+				host:     host,
+				port:     port,
+				link:     l,
+				udp:      udp,
+				getCreds: poolCreds(credFunc, streamsPerRoom),
+			})
 		}
+		log.Printf("VK: %d room(s), ~%d streams per room", len(paramsList), streamsPerRoom)
+	} else {
+		paramsList = []*turnParams{{
+			host:       host,
+			port:       port,
+			link:       link,
+			udp:        udp,
+			getCreds:   poolCreds(credFunc, n),
+			onAllocate: onAllocate,
+		}}
 	}
 
-	params := &turnParams{
-		host:       host,
-		port:       port,
-		link:       link,
-		udp:        udp,
-		getCreds:   poolCreds(credFunc, n),
-		onAllocate: onAllocate,
-	}
-
-	listenConnChan := make(chan net.PacketConn)
 	listenConn, err := net.ListenPacket("udp", localAddrStr)
 	if err != nil {
 		log.Printf("Failed to listen: %s", err)
 		return
+	}
+	// Increase local socket buffers
+	if udpConn, ok := listenConn.(*net.UDPConn); ok {
+		udpConn.SetReadBuffer(2 * 1024 * 1024)  // 2MB
+		udpConn.SetWriteBuffer(2 * 1024 * 1024) // 2MB
 	}
 
 	context.AfterFunc(ctx, func() {
@@ -942,13 +993,37 @@ func StartProxy(cLink *C.char, cPeerAddr *C.char, cLocalAddr *C.char, cN C.int) 
 		}
 	})
 
+	// Create per-stream channels for round-robin packet dispatch
+	inChans := make([]chan []byte, n)
+	for i := range inChans {
+		inChans[i] = make(chan []byte, 64)
+	}
+	var wgAddr atomic.Value
+
+	// Dispatcher: single reader on listenConn, round-robin to streams
 	go func() {
+		buf := make([]byte, 65535)
+		idx := 0
 		for {
-			select {
-			case <-ctx.Done():
+			nr, addr, err := listenConn.ReadFrom(buf)
+			if err != nil {
 				return
-			case listenConnChan <- listenConn:
 			}
+			wgAddr.Store(addr)
+			pkt := make([]byte, nr)
+			copy(pkt, buf[:nr])
+			// Round-robin: try each stream, send to first available
+			for attempts := 0; attempts < n; attempts++ {
+				select {
+				case inChans[idx%n] <- pkt:
+					idx++
+					goto dispatched
+				default:
+					idx++ // stream full, try next
+				}
+			}
+			// All streams full — drop packet (backpressure)
+		dispatched:
 		}
 	}()
 
@@ -959,10 +1034,10 @@ func StartProxy(cLink *C.char, cPeerAddr *C.char, cLocalAddr *C.char, cN C.int) 
 	connchan := make(chan net.PacketConn)
 
 	wg1.Go(func() {
-		oneDtlsConnectionLoop(ctx, peer, listenConnChan, connchan, okchan, params.singleShot)
+		oneDtlsConnectionLoop(ctx, peer, inChans[0], &wgAddr, listenConn, connchan, okchan, paramsList[0].singleShot, sessionID, 0)
 	})
 	wg1.Go(func() {
-		oneTurnConnectionLoop(ctx, params, peer, connchan, t)
+		oneTurnConnectionLoop(ctx, paramsList[0], peer, connchan, t)
 	})
 
 	select {
@@ -972,23 +1047,48 @@ func StartProxy(cLink *C.char, cPeerAddr *C.char, cLocalAddr *C.char, cN C.int) 
 
 	for i := 0; i < n-1; i++ {
 		cChan := make(chan net.PacketConn)
+		streamIdx := byte(i + 1)
+		p := paramsList[int(streamIdx)%len(paramsList)]
 		wg1.Go(func() {
-			oneDtlsConnectionLoop(ctx, peer, listenConnChan, cChan, nil, params.singleShot)
+			oneDtlsConnectionLoop(ctx, peer, inChans[streamIdx], &wgAddr, listenConn, cChan, nil, p.singleShot, sessionID, streamIdx)
 		})
 		wg1.Go(func() {
-			oneTurnConnectionLoop(ctx, params, peer, cChan, t)
+			oneTurnConnectionLoop(ctx, p, peer, cChan, t)
 		})
 	}
 
-	log.Printf("Proxy started on %s", localAddrStr)
+	log.Printf("Proxy started on %s with %d streams across %d room(s)", localAddrStr, n, len(paramsList))
 	wg1.Wait()
 }
 
 //export StopProxy
 func StopProxy() {
-	if proxyCancel != nil {
-		proxyCancel()
-		proxyCancel = nil
+	proxyMu.Lock()
+	c := proxyCancel
+	proxyCancel = nil
+	proxyMu.Unlock()
+	if c != nil {
+		c()
 		log.Println("Proxy gracefully stopped")
 	}
+}
+
+//export StopProxySync
+func StopProxySync() {
+	proxyMu.Lock()
+	c := proxyCancel
+	proxyCancel = nil
+	done := proxyDone
+	proxyMu.Unlock()
+	if c != nil {
+		c()
+	}
+	if done != nil {
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			log.Println("StopProxySync: timed out waiting for proxy cleanup")
+		}
+	}
+	log.Println("Proxy stopped and cleaned up")
 }

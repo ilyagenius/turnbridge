@@ -10,6 +10,18 @@
 
 ## Провайдеры туннелей
 
+### VK (ВКонтакте)
+
+Оригинальный бэкенд — через **TURN-серверы ВКонтакте** по DTLS. Трафик выглядит как видеозвонок VK.
+
+`turn` = ссылка на VK-звонок, `peer` = адрес VPS с портом vk-turn-proxy.
+
+### Wildberries (WB)
+
+Туннелирует через **TURN-серверы Wildberries** — трафик выглядит как видеостриминг WB.
+
+`turn` = `wb`, `peer` = адрес VPS с портом vk-turn-proxy (например `158.160.x.x:56000`).
+
 ### SberJazz / SaluteJazz
 
 Туннелирует WireGuard через **WebRTC DataChannel SberJazz** — трафик выглядит как видеозвонок Сбера. Работает в сетях с жёсткой фильтрацией.
@@ -23,18 +35,6 @@
 Туннелирует WireGuard через **WebRTC DataChannel Телемоста** — трафик выглядит как видеозвонок Яндекса.
 
 > **Требуется серверный компонент.** Контакт: **[@ilkl34](https://t.me/ilkl34)**
-
-### Wildberries (WB)
-
-Туннелирует через **TURN-серверы Wildberries** — трафик выглядит как видеостриминг WB.
-
-`turn` = `wb`, `peer` = адрес VPS с портом vk-turn-proxy (например `158.160.x.x:56000`).
-
-### VK (ВКонтакте)
-
-Оригинальный бэкенд — через **TURN-серверы ВКонтакте** по DTLS. Трафик выглядит как видеозвонок VK.
-
-`turn` = ссылка на VK-звонок, `peer` = адрес VPS с портом vk-turn-proxy.
 
 ---
 
@@ -79,10 +79,10 @@
 
 | Бэкенд | `turn` | `peer` |
 |--------|--------|--------|
+| VK | `https://vk.com/call/join/LINK_ID` | `IP_VPS:56000` |
+| WB | `wb` | `IP_VPS:56000` |
 | Jazz | `https://salutejazz.ru/calls/ROOM_ID?psw=PASSWORD` | *(пусто)* |
 | Telemost | `https://telemost.yandex.ru/j/ROOM_ID` | *(пусто)* |
-| WB | `wb` | `IP_VPS:56000` |
-| VK | `https://vk.com/call/join/LINK_ID` | `IP_VPS:56000` |
 
 ```json
 {

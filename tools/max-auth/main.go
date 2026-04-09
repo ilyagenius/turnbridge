@@ -199,23 +199,111 @@ func callsPost(form url.Values) ([]byte, error) {
 
 func main() {
 	phone := flag.String("phone", "", "Phone number in +7XXXXXXXXXX format")
+	token := flag.String("token", "", "Login token (from browser DevTools, skips SMS flow)")
 	test := flag.Bool("test", false, "Test TURN credential retrieval after auth")
 	flag.Parse()
 
-	if *phone == "" {
-		fmt.Println("Usage: go run . -phone +79991234567 [-test]")
+	if *phone == "" && *token == "" {
+		fmt.Println("Usage:")
+		fmt.Println("  go run . -token <login_token> -test   (token from browser)")
+		fmt.Println("  go run . -phone +79991234567 -test    (SMS auth)")
 		os.Exit(1)
 	}
 
-	// --- Step 1: Connect to OneMe ---
-	fmt.Println("[1/6] Connecting to OneMe WebSocket...")
-	client, err := newOneMeClient()
-	fatal(err, "connect")
-	defer client.close()
+	var loginToken string
 
-	// --- Step 2: ClientHello ---
-	fmt.Println("[2/6] Sending ClientHello...")
-	err = client.send(6, clientHello{
+	if *token != "" {
+		// --- Direct token mode: skip SMS, go straight to CallToken ---
+		loginToken = *token
+		fmt.Println("Using provided login token")
+	} else {
+		// --- SMS auth mode ---
+		fmt.Println("[1/6] Connecting to OneMe WebSocket...")
+		client, err := newOneMeClient()
+		fatal(err, "connect")
+		defer client.close()
+
+		fmt.Println("[2/6] Sending ClientHello...")
+		err = client.send(6, clientHello{
+			UserAgent: userAgent{
+				DeviceType:      "WEB",
+				Locale:          "ru",
+				DeviceLocale:    "ru",
+				OSVersion:       "Windows",
+				DeviceName:      "Chrome",
+				UserAgentHeader: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36",
+				AppVersion:      "25.11.2",
+				Screen:          "1080x1920 1.0x",
+				Timezone:        "Europe/Moscow",
+			},
+			DeviceID: uuid.NewString(),
+		})
+		fatal(err, "send ClientHello")
+		helloResp, err := client.recv()
+		fatal(err, "recv ClientHello")
+		helloJSON, _ := json.MarshalIndent(helloResp, "", "  ")
+		fmt.Printf("    ClientHello response: %s\n", string(helloJSON))
+
+		fmt.Printf("[3/6] Requesting SMS to %s...\n", *phone)
+		err = client.send(17, verificationReq{
+			Phone:    *phone,
+			Type:     "START_AUTH",
+			Language: "ru",
+		})
+		fatal(err, "send VerificationRequest")
+		resp, err := client.recv()
+		fatal(err, "recv VerificationRequest")
+		respJSON, _ := json.MarshalIndent(resp, "", "  ")
+		fmt.Printf("    VerificationRequest raw response: %s\n", string(respJSON))
+		p, err := client.payload(resp)
+		fatal(err, "VerificationRequest payload")
+		verifyToken, ok := p["token"].(string)
+		if !ok || verifyToken == "" {
+			fatal(fmt.Errorf("no verification token: %v", p), "VerificationRequest")
+		}
+		fmt.Println("    SMS sent!")
+
+		fmt.Print("[4/6] Enter SMS code: ")
+		reader := bufio.NewReader(os.Stdin)
+		code, _ := reader.ReadString('\n')
+		code = strings.TrimSpace(code)
+		if code == "" {
+			fatal(fmt.Errorf("empty code"), "input")
+		}
+
+		err = client.send(18, codeEnter{
+			Token:         verifyToken,
+			VerifyCode:    code,
+			AuthTokenType: "CHECK_CODE",
+		})
+		fatal(err, "send CodeEnter")
+		resp, err = client.recv()
+		fatal(err, "recv CodeEnter")
+		p, err = client.payload(resp)
+		fatal(err, "CodeEnter payload")
+
+		tokenAttrs, ok := p["tokenAttrs"].(map[string]interface{})
+		if !ok {
+			fatal(fmt.Errorf("no tokenAttrs: %v", p), "CodeEnter")
+		}
+		loginObj, ok := tokenAttrs["LOGIN"].(map[string]interface{})
+		if !ok {
+			fatal(fmt.Errorf("no LOGIN in tokenAttrs: %v", tokenAttrs), "CodeEnter")
+		}
+		loginToken, ok = loginObj["token"].(string)
+		if !ok || loginToken == "" {
+			fatal(fmt.Errorf("no token in LOGIN: %v", loginObj), "CodeEnter")
+		}
+		fmt.Println("    Authenticated!")
+	}
+
+	// --- ChatSync + CallToken (both modes) ---
+	fmt.Println("[5/6] Connecting to OneMe for call token...")
+	client2, err := newOneMeClient()
+	fatal(err, "connect for CallToken")
+	defer client2.close()
+
+	err = client2.send(6, clientHello{
 		UserAgent: userAgent{
 			DeviceType:      "WEB",
 			Locale:          "ru",
@@ -229,70 +317,11 @@ func main() {
 		},
 		DeviceID: uuid.NewString(),
 	})
-	fatal(err, "send ClientHello")
-	helloResp, err := client.recv()
-	fatal(err, "recv ClientHello")
-	helloJSON, _ := json.MarshalIndent(helloResp, "", "  ")
-	fmt.Printf("    ClientHello response: %s\n", string(helloJSON))
+	fatal(err, "send ClientHello 2")
+	_, err = client2.recv()
+	fatal(err, "recv ClientHello 2")
 
-	// --- Step 3: Request SMS ---
-	fmt.Printf("[3/6] Requesting SMS to %s...\n", *phone)
-	err = client.send(17, verificationReq{
-		Phone:    *phone,
-		Type:     "START_AUTH",
-		Language: "ru",
-	})
-	fatal(err, "send VerificationRequest")
-	resp, err := client.recv()
-	fatal(err, "recv VerificationRequest")
-	respJSON, _ := json.MarshalIndent(resp, "", "  ")
-	fmt.Printf("    VerificationRequest raw response: %s\n", string(respJSON))
-	p, err := client.payload(resp)
-	fatal(err, "VerificationRequest payload")
-	verifyToken, ok := p["token"].(string)
-	if !ok || verifyToken == "" {
-		fatal(fmt.Errorf("no verification token: %v", p), "VerificationRequest")
-	}
-	fmt.Println("    SMS sent!")
-
-	// --- Step 4: Enter code ---
-	fmt.Print("[4/6] Enter SMS code: ")
-	reader := bufio.NewReader(os.Stdin)
-	code, _ := reader.ReadString('\n')
-	code = strings.TrimSpace(code)
-	if code == "" {
-		fatal(fmt.Errorf("empty code"), "input")
-	}
-
-	err = client.send(18, codeEnter{
-		Token:         verifyToken,
-		VerifyCode:    code,
-		AuthTokenType: "CHECK_CODE",
-	})
-	fatal(err, "send CodeEnter")
-	resp, err = client.recv()
-	fatal(err, "recv CodeEnter")
-	p, err = client.payload(resp)
-	fatal(err, "CodeEnter payload")
-
-	// Extract login token from tokenAttrs.LOGIN.token
-	tokenAttrs, ok := p["tokenAttrs"].(map[string]interface{})
-	if !ok {
-		fatal(fmt.Errorf("no tokenAttrs: %v", p), "CodeEnter")
-	}
-	loginObj, ok := tokenAttrs["LOGIN"].(map[string]interface{})
-	if !ok {
-		fatal(fmt.Errorf("no LOGIN in tokenAttrs: %v", tokenAttrs), "CodeEnter")
-	}
-	loginToken, ok := loginObj["token"].(string)
-	if !ok || loginToken == "" {
-		fatal(fmt.Errorf("no token in LOGIN: %v", loginObj), "CodeEnter")
-	}
-	fmt.Println("    Authenticated!")
-
-	// --- Step 5: ChatSync + CallToken ---
-	fmt.Println("[5/6] Getting call token...")
-	err = client.send(19, chatSyncReq{
+	err = client2.send(19, chatSyncReq{
 		Token:        loginToken,
 		Interactive:  false,
 		ChatsCount:   40,
@@ -302,21 +331,24 @@ func main() {
 		DraftsSync:   0,
 	})
 	fatal(err, "send ChatSync")
-	_, err = client.recv()
+	chatResp, err := client2.recv()
 	fatal(err, "recv ChatSync")
+	chatJSON, _ := json.MarshalIndent(chatResp, "", "  ")
+	fmt.Printf("    ChatSync response: %s\n", string(chatJSON))
 
-	err = client.send(158, struct{}{})
+	err = client2.send(158, struct{}{})
 	fatal(err, "send CallTokenRequest")
-	resp, err = client.recv()
+	resp2, err := client2.recv()
 	fatal(err, "recv CallTokenRequest")
-	p, err = client.payload(resp)
+	p2, err := client2.payload(resp2)
 	fatal(err, "CallTokenRequest payload")
-	callToken, ok := p["token"].(string)
+	callToken, ok := p2["token"].(string)
 	if !ok || callToken == "" {
-		fatal(fmt.Errorf("no call token: %v", p), "CallTokenRequest")
+		fatal(fmt.Errorf("no call token: %v", p2), "CallTokenRequest")
 	}
+	fmt.Println("    Got call token!")
 
-	// --- Step 6: Get external_user_id via Calls API ---
+	// --- Calls API login ---
 	fmt.Println("[6/6] Logging into Calls API...")
 	sd := sessionData{
 		AuthToken:     callToken,

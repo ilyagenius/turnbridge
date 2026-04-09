@@ -201,6 +201,7 @@ func main() {
 	phone := flag.String("phone", "", "Phone number in +7XXXXXXXXXX format")
 	token := flag.String("token", "", "Login token (from browser DevTools, skips SMS flow)")
 	target := flag.String("target", "", "Target external_user_id (friend's ID). If empty, uses self-call")
+	link := flag.String("link", "", "MAX call link (e.g. https://max.ru/joincall/xxx or just the ID)")
 	test := flag.Bool("test", false, "Test TURN credential retrieval after auth")
 	flag.Parse()
 
@@ -385,13 +386,63 @@ func main() {
 
 	// --- Optional: test TURN ---
 	if *test {
-		targetID := login.ExternalUserID
-		if *target != "" {
-			targetID = *target
+		if *link != "" {
+			// Extract link ID from URL
+			joinLink := *link
+			if idx := strings.LastIndex(joinLink, "/"); idx >= 0 {
+				joinLink = joinLink[idx+1:]
+			}
+			if idx := strings.IndexAny(joinLink, "?#"); idx >= 0 {
+				joinLink = joinLink[:idx]
+			}
+			fmt.Printf("=== TESTING TURN via joinConversationByLink (link=%s) ===\n", joinLink)
+			testTURNByLink(login.SessionKey, joinLink)
+		} else {
+			targetID := login.ExternalUserID
+			if *target != "" {
+				targetID = *target
+			}
+			fmt.Printf("=== TESTING TURN via startConversation (target=%s) ===\n", targetID)
+			testTURN(login.SessionKey, targetID)
 		}
-		fmt.Printf("=== TESTING TURN CREDENTIALS (target=%s) ===\n", targetID)
-		testTURN(login.SessionKey, targetID)
 	}
+}
+
+func testTURNByLink(sessionKey, joinLink string) {
+	body, err := callsPost(url.Values{
+		"method":          {"vchat.joinConversationByLink"},
+		"format":          {"JSON"},
+		"application_key": {applicationKey},
+		"session_key":     {sessionKey},
+		"joinLink":        {joinLink},
+		"isVideo":         {"false"},
+		"protocolVersion": {"5"},
+	})
+	if err != nil {
+		fmt.Printf("TURN test FAILED: %v\n", err)
+		return
+	}
+
+	fmt.Printf("Raw response: %s\n\n", string(body))
+
+	var conv startedConversation
+	if err := json.Unmarshal(body, &conv); err != nil {
+		fmt.Printf("TURN test FAILED (parse): %v\n", err)
+		return
+	}
+
+	if conv.TurnServer.Username == "" {
+		fmt.Println("No TURN credentials in parsed response")
+		return
+	}
+
+	fmt.Printf("TURN Username:   %s\n", conv.TurnServer.Username)
+	fmt.Printf("TURN Credential: %s\n", conv.TurnServer.Credential)
+	fmt.Printf("TURN URLs:       %v\n", conv.TurnServer.URLs)
+	fmt.Printf("STUN URLs:       %v\n", conv.StunServer.URLs)
+	fmt.Printf("Signaling:       %s\n", conv.Endpoint)
+	fmt.Println()
+	fmt.Println("TURN credentials retrieved successfully!")
 }
 
 func testTURN(sessionKey, externalID string) {

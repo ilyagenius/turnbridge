@@ -3,10 +3,14 @@
 // Output: prints the room URL to stdout
 
 const { chromium } = require('playwright');
+const path = require('path');
+
+const COOKIES_PATH = path.join(__dirname, 'yandex-cookies.json');
 
 (async () => {
   const browser = await chromium.launch({ headless: true });
   const context = await browser.newContext({
+    storageState: COOKIES_PATH,
     locale: 'ru-RU',
     userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
   });

@@ -11,6 +11,8 @@ struct TurnConfigImport: Codable {
     let n: Int
     let wg: String
     let name: String?
+    let fallback: String?
+    let linkServer: String?
 }
 
 enum ConfigParseError: LocalizedError {

@@ -891,8 +891,60 @@ func poolCreds(f getCredsFunc, poolSize int) getCredsFunc {
 	}
 }
 
+// dispatchTarget holds the current set of channels the dispatcher routes packets to.
+type dispatchTarget struct {
+	chans []chan []byte
+	n     int
+}
+
+// detectProviderType returns "vk", "jazz", "telemost", "max", or "wb" from a link.
+func detectProviderType(link string) string {
+	if strings.HasPrefix(link, "max:") {
+		return "max"
+	}
+	if isJazzSignalingLink(link) {
+		return "jazz"
+	}
+	if isTelemostLink(link) {
+		return "telemost"
+	}
+	if strings.Contains(link, "wb") || strings.Contains(link, "wildberries") || strings.Contains(link, "stream.wb") {
+		return "wb"
+	}
+	return "vk"
+}
+
+// fetchLinksInternal fetches fresh room links from the link-server through the WG tunnel.
+func fetchLinksInternal(linkServer, providerType string) string {
+	linkURL := "http://" + linkServer + "/links"
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get(linkURL)
+	if err != nil {
+		log.Printf("[LinkRefresh] fetch error: %v", err)
+		return ""
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("[LinkRefresh] read error: %v", err)
+		return ""
+	}
+
+	var links map[string]string
+	if err := json.Unmarshal(body, &links); err != nil {
+		log.Printf("[LinkRefresh] parse error: %v", err)
+		return ""
+	}
+
+	freshLink := links[providerType]
+	if freshLink != "" {
+		log.Printf("[LinkRefresh] fresh %s link: %s", providerType, freshLink)
+	}
+	return freshLink
+}
+
 //export StartProxy
-func StartProxy(cLink *C.char, cPeerAddr *C.char, cLocalAddr *C.char, cN C.int) {
+func StartProxy(cLink *C.char, cFallbackLink *C.char, cPeerAddr *C.char, cLocalAddr *C.char, cN C.int, cLinkServer *C.char) {
 	select {
 	case <-proxyReady:
 	default:
@@ -903,13 +955,11 @@ func StartProxy(cLink *C.char, cPeerAddr *C.char, cLocalAddr *C.char, cN C.int) 
 	}
 
 	link := C.GoString(cLink)
+	fallbackLink := C.GoString(cFallbackLink)
 	peerAddrStr := C.GoString(cPeerAddr)
 	localAddrStr := C.GoString(cLocalAddr)
-
-	host := ""
-	port := "19302"
+	linkServer := C.GoString(cLinkServer)
 	n := int(cN)
-	udp := true
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -936,54 +986,330 @@ func StartProxy(cLink *C.char, cPeerAddr *C.char, cLocalAddr *C.char, cN C.int) 
 		n = 32
 	}
 
-	// proxy_v2: generate session ID (16-byte UUID) for stream aggregation
 	sessionUUID := uuid.New()
 	sessionID, _ := sessionUUID.MarshalBinary()
 
-	// Detect provider from link
-	isWB := strings.Contains(link, "wb") || strings.Contains(link, "wildberries") || strings.Contains(link, "stream.wb")
-	isJazz := isJazzSignalingLink(link)
-	isTelemost := isTelemostLink(link)
-	isMAX := strings.HasPrefix(link, "max:")
-	isVK := !isWB && !isJazz && !isTelemost && !isMAX
+	providerType := detectProviderType(link)
+	isVKMain := providerType == "vk"
+	hasFallback := fallbackLink != "" && !isVKMain
+
+	// --- Shared UDP listener ---
+	listenConn, err := net.ListenPacket("udp", localAddrStr)
+	if err != nil {
+		log.Printf("Failed to listen: %s", err)
+		return
+	}
+	if udpConn, ok := listenConn.(*net.UDPConn); ok {
+		udpConn.SetReadBuffer(2 * 1024 * 1024)
+		udpConn.SetWriteBuffer(2 * 1024 * 1024)
+	}
+	context.AfterFunc(ctx, func() {
+		if closeErr := listenConn.Close(); closeErr != nil {
+			log.Printf("Failed to close local connection: %s", closeErr)
+		}
+	})
+
+	var wgAddr atomic.Value
+	var activeDispatch atomic.Pointer[dispatchTarget]
+
+	// Persistent dispatcher: reads from listenConn, routes to active transport channels.
+	go func() {
+		buf := make([]byte, 65535)
+		idx := 0
+		for {
+			nr, addr, err := listenConn.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			wgAddr.Store(addr)
+			pkt := make([]byte, nr)
+			copy(pkt, buf[:nr])
+
+			dt := activeDispatch.Load()
+			if dt == nil {
+				continue
+			}
+			for attempts := 0; attempts < dt.n; attempts++ {
+				select {
+				case dt.chans[idx%dt.n] <- pkt:
+					idx++
+					goto dispatched
+				default:
+					idx++
+				}
+			}
+		dispatched:
+		}
+	}()
+
+	// --- No fallback: direct connection (original behavior) ---
+	if !hasFallback {
+		runDirectProxy(ctx, link, peerAddrStr, listenConn, &wgAddr, &activeDispatch, n, providerType, sessionID)
+		return
+	}
+
+	// --- Hot-swap loop: VK bootstrap → fetch link → main provider ---
+	log.Printf("[HotSwap] Mode: VK bootstrap → %s (n=%d)", providerType, n)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		// Phase 1: VK bootstrap (1 worker)
+		log.Printf("[Bootstrap] Starting VK fallback transport...")
+
+		peer, err := net.ResolveUDPAddr("udp", peerAddrStr)
+		if err != nil {
+			log.Printf("[Bootstrap] Resolve peer error: %v", err)
+			return
+		}
+
+		vkLinkParsed := fallbackLink
+		if parts := strings.Split(vkLinkParsed, "join/"); len(parts) > 1 {
+			vkLinkParsed = parts[len(parts)-1]
+		}
+		if cutIdx := strings.IndexAny(vkLinkParsed, "/?#"); cutIdx != -1 {
+			vkLinkParsed = vkLinkParsed[:cutIdx]
+		}
+
+		vkParams := &turnParams{
+			port:     "19302",
+			link:     vkLinkParsed,
+			udp:      true,
+			getCreds: poolCreds(getCreds, 1),
+		}
+
+		vkCtx, vkCancel := context.WithCancel(ctx)
+		vkInChans := []chan []byte{make(chan []byte, 64)}
+		activeDispatch.Store(&dispatchTarget{vkInChans, 1})
+
+		vkOk := make(chan struct{})
+		vkConnchan := make(chan net.PacketConn)
+		vkTick := time.Tick(200 * time.Millisecond)
+
+		vkWg := sync.WaitGroup{}
+		vkWg.Go(func() {
+			oneDtlsConnectionLoop(vkCtx, peer, vkInChans[0], &wgAddr, listenConn, vkConnchan, vkOk, false, sessionID, 0)
+		})
+		vkWg.Go(func() {
+			oneTurnConnectionLoop(vkCtx, vkParams, peer, vkConnchan, vkTick)
+		})
+
+		select {
+		case <-vkOk:
+			log.Printf("[Bootstrap] VK transport ready")
+		case <-ctx.Done():
+			vkCancel()
+			vkWg.Wait()
+			return
+		}
+
+		// proxyReady is signaled by oneDtlsConnection internally.
+		// On first run, Swift's ProxyWaitReady picks it up.
+
+		// Phase 2: Fetch fresh link through WG tunnel
+		if linkServer != "" {
+			time.Sleep(3 * time.Second) // wait for WG handshake
+			freshLink := fetchLinksInternal(linkServer, providerType)
+			if freshLink != "" {
+				link = freshLink
+				log.Printf("[Bootstrap] Got fresh %s link", providerType)
+			} else {
+				log.Printf("[Bootstrap] No fresh link, using existing")
+			}
+		}
+
+		// Phase 3: Stop VK bootstrap
+		vkCancel()
+		vkWg.Wait()
+		activeDispatch.Store(nil)
+		log.Printf("[HotSwap] VK stopped, switching to %s...", providerType)
+
+		// Phase 4: Start main provider
+		mainCtx, mainCancel := context.WithCancel(ctx)
+		mainErrCh := make(chan error, 1)
+
+		switch providerType {
+		case "jazz":
+			ch := make(chan []byte, 64)
+			activeDispatch.Store(&dispatchTarget{[]chan []byte{ch}, 1})
+			go func() {
+				err := startJazzWebRTCProxy(mainCtx, link, listenConn, ch, &wgAddr)
+				if err != nil && !errors.Is(err, context.Canceled) {
+					select {
+					case mainErrCh <- err:
+					default:
+					}
+				}
+			}()
+
+		case "telemost":
+			ch := make(chan []byte, 64)
+			activeDispatch.Store(&dispatchTarget{[]chan []byte{ch}, 1})
+			go func() {
+				err := startTelemostWebRTCProxy(mainCtx, link, listenConn, ch, &wgAddr)
+				if err != nil && !errors.Is(err, context.Canceled) {
+					select {
+					case mainErrCh <- err:
+					default:
+					}
+				}
+			}()
+
+		case "max":
+			mainInChans := make([]chan []byte, n)
+			for i := range mainInChans {
+				mainInChans[i] = make(chan []byte, 64)
+			}
+			activeDispatch.Store(&dispatchTarget{mainInChans, n})
+
+			maxLink := strings.TrimPrefix(link, "max:")
+			maxParams := &turnParams{
+				link:     maxLink,
+				udp:      true,
+				getCreds: poolCreds(getCredsMAX, n),
+			}
+
+			mainOk := make(chan struct{})
+			mainConnchan := make(chan net.PacketConn)
+			mainTick := time.Tick(200 * time.Millisecond)
+
+			go func() {
+				oneDtlsConnectionLoop(mainCtx, peer, mainInChans[0], &wgAddr, listenConn, mainConnchan, mainOk, false, sessionID, 0)
+			}()
+			go func() {
+				oneTurnConnectionLoop(mainCtx, maxParams, peer, mainConnchan, mainTick)
+			}()
+
+			select {
+			case <-mainOk:
+			case <-mainCtx.Done():
+			}
+
+			for i := 1; i < n; i++ {
+				cc := make(chan net.PacketConn)
+				si := byte(i)
+				go func() {
+					oneDtlsConnectionLoop(mainCtx, peer, mainInChans[si], &wgAddr, listenConn, cc, nil, false, sessionID, si)
+				}()
+				go func() {
+					oneTurnConnectionLoop(mainCtx, maxParams, peer, cc, mainTick)
+				}()
+			}
+
+		case "wb":
+			mainInChans := make([]chan []byte, n)
+			for i := range mainInChans {
+				mainInChans[i] = make(chan []byte, 64)
+			}
+			activeDispatch.Store(&dispatchTarget{mainInChans, n})
+
+			wbParams := &turnParams{
+				link:     "",
+				udp:      true,
+				getCreds: poolCreds(getCredsWB, n),
+			}
+
+			mainOk := make(chan struct{})
+			mainConnchan := make(chan net.PacketConn)
+			mainTick := time.Tick(200 * time.Millisecond)
+
+			go func() {
+				oneDtlsConnectionLoop(mainCtx, peer, mainInChans[0], &wgAddr, listenConn, mainConnchan, mainOk, false, sessionID, 0)
+			}()
+			go func() {
+				oneTurnConnectionLoop(mainCtx, wbParams, peer, mainConnchan, mainTick)
+			}()
+
+			select {
+			case <-mainOk:
+			case <-mainCtx.Done():
+			}
+
+			for i := 1; i < n; i++ {
+				cc := make(chan net.PacketConn)
+				si := byte(i)
+				go func() {
+					oneDtlsConnectionLoop(mainCtx, peer, mainInChans[si], &wgAddr, listenConn, cc, nil, false, sessionID, si)
+				}()
+				go func() {
+					oneTurnConnectionLoop(mainCtx, wbParams, peer, cc, mainTick)
+				}()
+			}
+
+		default:
+			log.Printf("[HotSwap] Unknown provider: %s", providerType)
+			mainCancel()
+			return
+		}
+
+		log.Printf("[HotSwap] %s transport started", providerType)
+
+		select {
+		case err := <-mainErrCh:
+			log.Printf("[HotSwap] %s failed: %v, restarting via VK...", providerType, err)
+			mainCancel()
+			time.Sleep(2 * time.Second)
+			continue
+		case <-ctx.Done():
+			mainCancel()
+			return
+		}
+	}
+}
+
+// runDirectProxy handles direct proxy without VK bootstrap (original behavior).
+func runDirectProxy(ctx context.Context, link, peerAddrStr string, listenConn net.PacketConn, wgAddr *atomic.Value, activeDispatch *atomic.Pointer[dispatchTarget], n int, providerType string, sessionID []byte) {
+	host := ""
+	port := "19302"
+	udp := true
 
 	var credFunc getCredsFunc
 	var peer *net.UDPAddr
 	var err error
 	var onAllocate func(context.Context, string) error
-	if isWB {
+
+	switch providerType {
+	case "wb":
 		log.Printf("Using WB (Wildberries) TURN provider")
 		credFunc = getCredsWB
-		link = "" // WB creates its own rooms, no link needed
-		port = "" // WB: use port from TURN server response (3478), don't override
+		link = ""
+		port = ""
 		peer, err = net.ResolveUDPAddr("udp", peerAddrStr)
 		if err != nil {
 			log.Printf("Resolve UDP error: %v", err)
 			return
 		}
-	} else if isJazz {
+	case "jazz":
 		log.Printf("Using Jazz WebRTC provider")
-		if err := startJazzWebRTCProxy(ctx, link, localAddrStr); err != nil && !errors.Is(err, context.Canceled) {
+		ch := make(chan []byte, 64)
+		activeDispatch.Store(&dispatchTarget{[]chan []byte{ch}, 1})
+		if err := startJazzWebRTCProxy(ctx, link, listenConn, ch, wgAddr); err != nil && !errors.Is(err, context.Canceled) {
 			log.Printf("Jazz WebRTC failed: %v", err)
 		}
 		return
-	} else if isTelemost {
+	case "telemost":
 		log.Printf("Using Telemost WebRTC provider")
-		if err := startTelemostWebRTCProxy(ctx, link, localAddrStr); err != nil && !errors.Is(err, context.Canceled) {
+		ch := make(chan []byte, 64)
+		activeDispatch.Store(&dispatchTarget{[]chan []byte{ch}, 1})
+		if err := startTelemostWebRTCProxy(ctx, link, listenConn, ch, wgAddr); err != nil && !errors.Is(err, context.Canceled) {
 			log.Printf("Telemost WebRTC failed: %v", err)
 		}
 		return
-	} else if isMAX {
+	case "max":
 		log.Printf("Using MAX TURN provider")
 		credFunc = getCredsMAX
 		link = strings.TrimPrefix(link, "max:")
-		port = "" // use port from TURN server response
+		port = ""
 		peer, err = net.ResolveUDPAddr("udp", peerAddrStr)
 		if err != nil {
 			log.Printf("Resolve UDP error: %v", err)
 			return
 		}
-	} else {
+	default: // vk
 		log.Printf("Using VK TURN provider")
 		credFunc = getCreds
 		peer, err = net.ResolveUDPAddr("udp", peerAddrStr)
@@ -993,9 +1319,9 @@ func StartProxy(cLink *C.char, cPeerAddr *C.char, cLocalAddr *C.char, cN C.int) 
 		}
 	}
 
-	// Multi-room support: comma-separated VK links → separate turnParams per room
+	// Multi-room support for VK
 	var paramsList []*turnParams
-	if isVK {
+	if providerType == "vk" {
 		vkLinks := strings.Split(link, ",")
 		streamsPerRoom := (n + len(vkLinks) - 1) / len(vkLinks)
 		for _, l := range vkLinks {
@@ -1025,56 +1351,11 @@ func StartProxy(cLink *C.char, cPeerAddr *C.char, cLocalAddr *C.char, cN C.int) 
 		}}
 	}
 
-	listenConn, err := net.ListenPacket("udp", localAddrStr)
-	if err != nil {
-		log.Printf("Failed to listen: %s", err)
-		return
-	}
-	// Increase local socket buffers
-	if udpConn, ok := listenConn.(*net.UDPConn); ok {
-		udpConn.SetReadBuffer(2 * 1024 * 1024)  // 2MB
-		udpConn.SetWriteBuffer(2 * 1024 * 1024) // 2MB
-	}
-
-	context.AfterFunc(ctx, func() {
-		if closeErr := listenConn.Close(); closeErr != nil {
-			log.Printf("Failed to close local connection: %s", closeErr)
-		}
-	})
-
-	// Create per-stream channels for round-robin packet dispatch
 	inChans := make([]chan []byte, n)
 	for i := range inChans {
 		inChans[i] = make(chan []byte, 64)
 	}
-	var wgAddr atomic.Value
-
-	// Dispatcher: single reader on listenConn, round-robin to streams
-	go func() {
-		buf := make([]byte, 65535)
-		idx := 0
-		for {
-			nr, addr, err := listenConn.ReadFrom(buf)
-			if err != nil {
-				return
-			}
-			wgAddr.Store(addr)
-			pkt := make([]byte, nr)
-			copy(pkt, buf[:nr])
-			// Round-robin: try each stream, send to first available
-			for attempts := 0; attempts < n; attempts++ {
-				select {
-				case inChans[idx%n] <- pkt:
-					idx++
-					goto dispatched
-				default:
-					idx++ // stream full, try next
-				}
-			}
-			// All streams full — drop packet (backpressure)
-		dispatched:
-		}
-	}()
+	activeDispatch.Store(&dispatchTarget{inChans, n})
 
 	wg1 := sync.WaitGroup{}
 	t := time.Tick(200 * time.Millisecond)
@@ -1083,7 +1364,7 @@ func StartProxy(cLink *C.char, cPeerAddr *C.char, cLocalAddr *C.char, cN C.int) 
 	connchan := make(chan net.PacketConn)
 
 	wg1.Go(func() {
-		oneDtlsConnectionLoop(ctx, peer, inChans[0], &wgAddr, listenConn, connchan, okchan, paramsList[0].singleShot, sessionID, 0)
+		oneDtlsConnectionLoop(ctx, peer, inChans[0], wgAddr, listenConn, connchan, okchan, paramsList[0].singleShot, sessionID, 0)
 	})
 	wg1.Go(func() {
 		oneTurnConnectionLoop(ctx, paramsList[0], peer, connchan, t)
@@ -1099,14 +1380,14 @@ func StartProxy(cLink *C.char, cPeerAddr *C.char, cLocalAddr *C.char, cN C.int) 
 		streamIdx := byte(i + 1)
 		p := paramsList[int(streamIdx)%len(paramsList)]
 		wg1.Go(func() {
-			oneDtlsConnectionLoop(ctx, peer, inChans[streamIdx], &wgAddr, listenConn, cChan, nil, p.singleShot, sessionID, streamIdx)
+			oneDtlsConnectionLoop(ctx, peer, inChans[streamIdx], wgAddr, listenConn, cChan, nil, p.singleShot, sessionID, streamIdx)
 		})
 		wg1.Go(func() {
 			oneTurnConnectionLoop(ctx, p, peer, cChan, t)
 		})
 	}
 
-	log.Printf("Proxy started on %s with %d streams across %d room(s)", localAddrStr, n, len(paramsList))
+	log.Printf("Proxy started on %s with %d streams across %d room(s)", listenConn.LocalAddr().String(), n, len(paramsList))
 	wg1.Wait()
 }
 

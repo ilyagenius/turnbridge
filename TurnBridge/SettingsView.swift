@@ -37,6 +37,16 @@ struct SettingsView: View {
                 Stepper("Connections (n): \(profile.nValue)", value: binding(\.nValue), in: 1...16)
             }
 
+            Section(header: Text("Auto-Reconnect")) {
+                TextField("Fallback (VK) Link", text: binding(\.fallbackLink))
+                    .autocapitalization(.none)
+                    .disableAutocorrection(true)
+
+                TextField("Link Server", text: binding(\.linkServer))
+                    .autocapitalization(.none)
+                    .disableAutocorrection(true)
+            }
+
             Section(header: Text("WireGuard Config")) {
                 TextEditor(text: binding(\.wgQuickConfig))
                     .font(.system(.footnote, design: .monospaced))

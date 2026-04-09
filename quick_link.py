@@ -4,9 +4,11 @@ import base64
 config = {
     "name": "My Server",
     "turn": "https://salutejazz.ru/call/ROOM_ID/PASSWORD",
+    "fallback": "https://vk.com/call/join/YOUR_VK_LINK",
     "peer": "",
     "listen": "127.0.0.1:9000",
-    "n": 1,
+    "n": 5,
+    "linkServer": "10.77.77.1:8080",
     "wg": """[Interface]
 PrivateKey = YOUR_CLIENT_PRIVATE_KEY
 Address = 10.77.77.2/24

@@ -1,6 +1,8 @@
 #!/bin/bash
 # refresh.sh — Refreshes Jazz and Telemost room links
-# Run via cron: 0 */3 * * * /home/ilya/link-refresh/refresh.sh
+# Cron:
+#   0 */12 * * * cd /home/ilya/link-refresh && node yandex-refresh-session.js >> refresh.log 2>&1
+#   0 */3  * * * /home/ilya/link-refresh/refresh.sh
 
 set -euo pipefail
 

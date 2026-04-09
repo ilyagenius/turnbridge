@@ -14,8 +14,8 @@ struct TurnBridge: App {
         }
     }
     
-    func turnOnTunnel(vkLink: String, peerAddr: String, listenAddr: String, nValue: Int, wgQuickConfig: String, completionHandler: @escaping (Bool) -> Void) {
-        SharedLogger.info("Connecting... peer=\(peerAddr), listen=\(listenAddr), n=\(nValue)")
+    func turnOnTunnel(vkLink: String, peerAddr: String, listenAddr: String, nValue: Int, wgQuickConfig: String, fallbackLink: String = "", linkServer: String = "", completionHandler: @escaping (Bool) -> Void) {
+        SharedLogger.info("Connecting... peer=\(peerAddr), listen=\(listenAddr), n=\(nValue), fallback=\(fallbackLink.isEmpty ? "none" : "VK")")
 
         NETunnelProviderManager.loadAllFromPreferences { tunnelManagersInSettings, error in
             if let error = error {
@@ -40,7 +40,9 @@ struct TurnBridge: App {
                 "vkLink": vkLink,
                 "peerAddr": peerAddr,
                 "listenAddr": listenAddr,
-                "nValue": nValue
+                "nValue": nValue,
+                "fallbackLink": fallbackLink,
+                "linkServer": linkServer
             ]
 
             let defaults = UserDefaults.standard

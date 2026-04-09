@@ -47,4 +47,8 @@ extern void ProxySolveCaptcha(const char *successToken);
 extern void ProxySetCaptchaToken(const char *successToken);
 // Returns: 0=timeout, 1=ready, 2=captcha_needed (fail-fast).
 
+// Fetch updated room links from link-server via WG tunnel.
+// Returns JSON string (caller must free) or NULL on error.
+extern char *ProxyFetchLinks(const char *url);
+
 #endif

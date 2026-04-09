@@ -124,6 +124,31 @@ func ProxyWaitReady(timeoutMs C.int) C.int {
 	}
 }
 
+// ProxyFetchLinks fetches updated room links from the link-server running on the
+// WG interface. Called by Swift after the WireGuard tunnel is established.
+// Returns a C string with JSON like {"jazz":"...","telemost":"...","updated":"..."}.
+// The caller must free the returned string with C.free.
+// Returns NULL on error.
+//
+//export ProxyFetchLinks
+func ProxyFetchLinks(cURL *C.char) *C.char {
+	url := C.GoString(cURL)
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		log.Printf("[LinkRefresh] fetch error: %v", err)
+		return nil
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("[LinkRefresh] read error: %v", err)
+		return nil
+	}
+	log.Printf("[LinkRefresh] got links: %s", string(body))
+	return C.CString(string(body))
+}
+
 type ProxyLogger int
 
 func (l ProxyLogger) Write(p []byte) (n int, err error) {

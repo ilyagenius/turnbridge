@@ -90,7 +90,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             return
         }
 
-        guard let vkLink = providerConfiguration["vkLink"] as? String,
+        guard var vkLink = providerConfiguration["vkLink"] as? String,
               let peerAddr = providerConfiguration["peerAddr"] as? String,
               let listenAddr = providerConfiguration["listenAddr"] as? String,
               let nValueInt = providerConfiguration["nValue"] as? Int else {
@@ -100,6 +100,20 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             return
         }
         let nValue = Int32(nValueInt)
+
+        // Check for auto-refreshed links from previous session
+        if let groupID = SharedLogger.appGroupID,
+           let defaults = UserDefaults(suiteName: groupID) {
+            if vkLink.contains("salutejazz.ru"),
+               let updated = defaults.string(forKey: "tb_updated_link_jazz"), !updated.isEmpty {
+                SharedLogger.info("[LinkRefresh] Using updated Jazz link", source: .tunnel)
+                vkLink = updated
+            } else if vkLink.contains("telemost.yandex.ru"),
+                      let updated = defaults.string(forKey: "tb_updated_link_telemost"), !updated.isEmpty {
+                SharedLogger.info("[LinkRefresh] Using updated Telemost link", source: .tunnel)
+                vkLink = updated
+            }
+        }
 
         SharedLogger.info("Peer: \(peerAddr), Listen: \(listenAddr), N: \(nValue)", source: .tunnel)
         SharedLogger.info("Starting TURN proxy...", source: .tunnel)
@@ -150,6 +164,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                     let interfaceName = self.adapter.interfaceName ?? "unknown"
                     sharedLogger.log("Tunnel interface is \(interfaceName)")
                     SharedLogger.info("Tunnel up on interface \(interfaceName)", source: .wireguard)
+
+                    // Fetch updated room links through the WG tunnel
+                    self.fetchUpdatedLinks()
                 }
                 completionHandler(adapterError)
             }
@@ -241,6 +258,41 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             ]
             let data = try? JSONSerialization.data(withJSONObject: stats)
             completionHandler?(data)
+        }
+    }
+
+    // MARK: - Link auto-refresh
+
+    private func fetchUpdatedLinks() {
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 3) { [weak self] in
+            guard self != nil else { return }
+            let url = "http://10.77.77.1:8080/links"
+            guard let cResult = url.withCString({ ProxyFetchLinks($0) }) else {
+                SharedLogger.info("[LinkRefresh] No links from server (NULL)", source: .tunnel)
+                return
+            }
+            let json = String(cString: cResult)
+            free(cResult)
+
+            SharedLogger.info("[LinkRefresh] Received: \(json)", source: .tunnel)
+
+            guard let data = json.data(using: .utf8),
+                  let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                SharedLogger.error("[LinkRefresh] Failed to parse JSON", source: .tunnel)
+                return
+            }
+
+            guard let groupID = SharedLogger.appGroupID,
+                  let defaults = UserDefaults(suiteName: groupID) else { return }
+
+            if let jazz = dict["jazz"] as? String, !jazz.isEmpty {
+                defaults.set(jazz, forKey: "tb_updated_link_jazz")
+            }
+            if let telemost = dict["telemost"] as? String, !telemost.isEmpty {
+                defaults.set(telemost, forKey: "tb_updated_link_telemost")
+            }
+            defaults.synchronize()
+            SharedLogger.info("[LinkRefresh] Links saved to App Group", source: .tunnel)
         }
     }
 

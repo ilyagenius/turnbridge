@@ -878,6 +878,7 @@ func StartProxy(cLink *C.char, cPeerAddr *C.char, cLocalAddr *C.char, cN C.int) 
 	isWB := strings.Contains(link, "wb") || strings.Contains(link, "wildberries") || strings.Contains(link, "stream.wb")
 	isJazz := isJazzSignalingLink(link)
 	isTelemost := isTelemostLink(link)
+	isMAX := strings.HasPrefix(link, "max:")
 
 	var credFunc getCredsFunc
 	var peer *net.UDPAddr
@@ -905,6 +906,16 @@ func StartProxy(cLink *C.char, cPeerAddr *C.char, cLocalAddr *C.char, cN C.int) 
 			log.Printf("Telemost WebRTC failed: %v", err)
 		}
 		return
+	} else if isMAX {
+		log.Printf("Using MAX TURN provider")
+		credFunc = getCredsMAX
+		link = strings.TrimPrefix(link, "max:")
+		port = "" // use port from TURN server response
+		peer, err = net.ResolveUDPAddr("udp", peerAddrStr)
+		if err != nil {
+			log.Printf("Resolve UDP error: %v", err)
+			return
+		}
 	} else {
 		log.Printf("Using VK TURN provider")
 		credFunc = getCreds

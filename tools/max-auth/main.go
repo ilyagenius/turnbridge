@@ -200,13 +200,14 @@ func callsPost(form url.Values) ([]byte, error) {
 func main() {
 	phone := flag.String("phone", "", "Phone number in +7XXXXXXXXXX format")
 	token := flag.String("token", "", "Login token (from browser DevTools, skips SMS flow)")
+	target := flag.String("target", "", "Target external_user_id (friend's ID). If empty, uses self-call")
 	test := flag.Bool("test", false, "Test TURN credential retrieval after auth")
 	flag.Parse()
 
 	if *phone == "" && *token == "" {
 		fmt.Println("Usage:")
-		fmt.Println("  go run . -token <login_token> -test   (token from browser)")
-		fmt.Println("  go run . -phone +79991234567 -test    (SMS auth)")
+		fmt.Println("  go run . -token <login_token> -test -target <friend_id>")
+		fmt.Println("  go run . -phone +79991234567 -test")
 		os.Exit(1)
 	}
 
@@ -384,8 +385,12 @@ func main() {
 
 	// --- Optional: test TURN ---
 	if *test {
-		fmt.Println("=== TESTING TURN CREDENTIALS (self-call) ===")
-		testTURN(login.SessionKey, login.ExternalUserID)
+		targetID := login.ExternalUserID
+		if *target != "" {
+			targetID = *target
+		}
+		fmt.Printf("=== TESTING TURN CREDENTIALS (target=%s) ===\n", targetID)
+		testTURN(login.SessionKey, targetID)
 	}
 }
 

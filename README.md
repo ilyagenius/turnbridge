@@ -20,12 +20,12 @@
 - CreatePermission на произвольные IP — разрешён
 - Бейдж провайдера в приложении (cyan)
 
-**Serverless** — серверный компонент НЕ нужен. MAX TURN-серверы напрямую релеят трафик на ваш VPS.
-
 `turn` = `max:<login_token>|<join_link_id>`, `peer` = адрес VPS с портом (например `158.160.x.x:56000`).
 
-> **Как получить токен:** залогиниться в `web.max.ru` через QR → DevTools → WS → opcode 19 → `token`.
-> **Как получить join_link_id:** создать звонок в MAX → скопировать ссылку → часть после `/joincall/`.
+> **Server component required.**
+> Для получения `login_token` требуется серверный компонент аутентификации (SMS через OneMe API).
+> `join_link_id` — создать звонок в MAX → скопировать ссылку → часть после `/joincall/`.
+> Контакт: **[@ilkl34](https://t.me/ilkl34)** в Telegram.
 
 ### VK (ВКонтакте)
 

@@ -106,7 +106,7 @@ func telemostICEConfig(conn *telemostConnInfo) []webrtc.ICEServer {
 	return servers
 }
 
-func startTelemostWebRTCProxy(ctx context.Context, roomURL string, localAddrStr string) error {
+func startTelemostWebRTCProxy(ctx context.Context, roomURL string, listenConn net.PacketConn, inCh <-chan []byte, wgAddr *atomic.Value) error {
 	participantName := fmt.Sprintf("turnbridge-ios-%d", time.Now().UnixNano()%100000)
 
 	conn, err := fetchTelemostConnectionInfo(roomURL, participantName)
@@ -114,17 +114,6 @@ func startTelemostWebRTCProxy(ctx context.Context, roomURL string, localAddrStr 
 		return fmt.Errorf("fetch telemost connection info: %w", err)
 	}
 	log.Printf("Telemost connection info: roomID=%s peerID=%s wsURL=%s", conn.RoomID, conn.PeerID, conn.ClientConfig.MediaServerURL)
-
-	listenConn, err := net.ListenPacket("udp", localAddrStr)
-	if err != nil {
-		return fmt.Errorf("listen telemost local UDP: %w", err)
-	}
-	defer listenConn.Close()
-
-	context.AfterFunc(ctx, func() {
-		_ = listenConn.SetDeadline(time.Now())
-		_ = listenConn.Close()
-	})
 
 	ws, _, err := websocket.DefaultDialer.Dial(conn.ClientConfig.MediaServerURL, nil)
 	if err != nil {
@@ -213,10 +202,7 @@ func startTelemostWebRTCProxy(ctx context.Context, roomURL string, localAddrStr 
 		})
 	})
 
-	// lastAddr tracks the most recent WireGuard sender address on listenConn.
-	var lastAddr atomic.Value
-
-	// Publisher DC open: signal proxy ready, then read from listenConn and send to server.
+	// Publisher DC open: signal proxy ready, then read from inCh and send to server.
 	pubDC.OnOpen(func() {
 		log.Printf("Established Telemost WebRTC data channel")
 		select {
@@ -225,22 +211,8 @@ func startTelemostWebRTCProxy(ctx context.Context, roomURL string, localAddrStr 
 		}
 
 		go func() {
-			buf := make([]byte, 4096)
-			for {
-				n, addr1, err := listenConn.ReadFrom(buf)
-				if err != nil {
-					if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-						select {
-						case <-ctx.Done():
-							return
-						default:
-							continue
-						}
-					}
-					return
-				}
-				lastAddr.Store(addr1)
-				if err := pubDC.Send(buf[:n]); err != nil {
+			for pkt := range inCh {
+				if err := pubDC.Send(pkt); err != nil {
 					log.Printf("Telemost local->DataChannel send failed: %v", err)
 					return
 				}
@@ -255,7 +227,7 @@ func startTelemostWebRTCProxy(ctx context.Context, roomURL string, localAddrStr 
 			if len(msg.Data) == 0 {
 				return
 			}
-			addr1, ok := lastAddr.Load().(net.Addr)
+			addr1, ok := wgAddr.Load().(net.Addr)
 			if !ok {
 				return
 			}
@@ -307,7 +279,7 @@ func startTelemostWebRTCProxy(ctx context.Context, roomURL string, localAddrStr 
 		return fmt.Errorf("send hello: %w", err)
 	}
 
-	log.Printf("Telemost proxy started on %s", localAddrStr)
+	log.Printf("Telemost proxy started on %s", listenConn.LocalAddr().String())
 
 	// Keep-alive: WS pings every 30s, app-level pings every 5s.
 	go func() {

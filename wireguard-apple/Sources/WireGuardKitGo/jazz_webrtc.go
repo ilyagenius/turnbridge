@@ -515,23 +515,12 @@ func attachJazzClientStateLogging(name string, pc *webrtc.PeerConnection, errCh 
 	})
 }
 
-func startJazzWebRTCProxy(ctx context.Context, link string, localAddrStr string) error {
+func startJazzWebRTCProxy(ctx context.Context, link string, listenConn net.PacketConn, inCh <-chan []byte, wgAddr *atomic.Value) error {
 	room, err := fetchJazzRoom(ctx, link)
 	if err != nil {
 		return fmt.Errorf("fetch Jazz room: %w", err)
 	}
 	log.Printf("Jazz room acquired: %s", room.RoomID)
-
-	listenConn, err := net.ListenPacket("udp", localAddrStr)
-	if err != nil {
-		return fmt.Errorf("listen Jazz local UDP: %w", err)
-	}
-	defer listenConn.Close()
-
-	context.AfterFunc(ctx, func() {
-		_ = listenConn.SetDeadline(time.Now())
-		_ = listenConn.Close()
-	})
 
 	connector, err := openJazzRTCConnector(ctx, room)
 	if err != nil {
@@ -602,7 +591,6 @@ func startJazzWebRTCProxy(ctx context.Context, link string, localAddrStr string)
 	publisherRemoteICE := &jazzClientRemoteCandidateQueue{}
 
 	// Publisher DC sends WG packets to VPS; subscriber DC receives VPS responses.
-	var lastAddr atomic.Value
 	publisherDC.OnOpen(func() {
 		log.Printf("Established Jazz WebRTC data channel")
 		select {
@@ -611,22 +599,8 @@ func startJazzWebRTCProxy(ctx context.Context, link string, localAddrStr string)
 		}
 
 		go func() {
-			buf := make([]byte, 2048)
-			for {
-				n, addr1, err := listenConn.ReadFrom(buf)
-				if err != nil {
-					if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-						select {
-						case <-ctx.Done():
-							return
-						default:
-							continue
-						}
-					}
-					return
-				}
-				lastAddr.Store(addr1)
-				if err := publisherDC.Send(encodeDataPacket(buf[:n])); err != nil {
+			for pkt := range inCh {
+				if err := publisherDC.Send(encodeDataPacket(pkt)); err != nil {
 					log.Printf("Jazz local->DataChannel send failed: %v", err)
 					return
 				}
@@ -644,7 +618,7 @@ func startJazzWebRTCProxy(ctx context.Context, link string, localAddrStr string)
 			if !ok || len(payload) == 0 {
 				return
 			}
-			addr1, ok := lastAddr.Load().(net.Addr)
+			addr1, ok := wgAddr.Load().(net.Addr)
 			if !ok {
 				return
 			}
@@ -713,7 +687,7 @@ func startJazzWebRTCProxy(ctx context.Context, link string, localAddrStr string)
 		}
 	}()
 
-	log.Printf("Proxy started on %s", localAddrStr)
+	log.Printf("Proxy started on %s", listenConn.LocalAddr().String())
 
 	go func() {
 		offer, err := waitForJazzDataOffer(setupCtx, connector)

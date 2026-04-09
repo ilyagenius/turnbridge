@@ -767,7 +767,8 @@ struct ContentView: View {
             vpnStatus = .connecting
             app.turnOnTunnel(vkLink: profile.vkLink, peerAddr: profile.peerAddr,
                              listenAddr: profile.listenAddr, nValue: profile.nValue,
-                             wgQuickConfig: profile.wgQuickConfig) { isSuccess in
+                             wgQuickConfig: profile.wgQuickConfig,
+                             fallbackLink: profile.fallbackLink, linkServer: profile.linkServer) { isSuccess in
                 if !isSuccess { vpnStatus = .disconnected; SharedLogger.error("Tunnel start failed") }
             }
         }
@@ -791,7 +792,8 @@ struct ContentView: View {
         do {
             let config = try ConfigParser.parse(from: str)
             let profile = VPNProfile(name: config.name ?? "Profile", vkLink: config.turn, peerAddr: config.peer,
-                                     listenAddr: config.listen, nValue: config.n, wgQuickConfig: config.wg)
+                                     listenAddr: config.listen, nValue: config.n, wgQuickConfig: config.wg,
+                                     fallbackLink: config.fallback ?? "", linkServer: config.linkServer ?? "10.77.77.1:8080")
             store.addProfile(profile)
             SharedLogger.info("Profile \"\(store.selectedProfile?.name ?? "")\" imported from clipboard")
             withAnimation { showImportModal = false }
@@ -811,6 +813,8 @@ struct ContentView: View {
             var updated = existing
             updated.vkLink = config.turn; updated.peerAddr = config.peer
             updated.listenAddr = config.listen; updated.nValue = config.n; updated.wgQuickConfig = config.wg
+            if let fb = config.fallback { updated.fallbackLink = fb }
+            if let ls = config.linkServer { updated.linkServer = ls }
             store.updateProfile(updated)
             SharedLogger.info("Profile \"\(existing.name)\" updated from clipboard")
             showAlert(title: "Updated", message: "Profile \"\(existing.name)\" config replaced.")

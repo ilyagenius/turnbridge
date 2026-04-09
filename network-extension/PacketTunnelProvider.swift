@@ -100,6 +100,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             return
         }
         let nValue = Int32(nValueInt)
+        let fallbackLink = providerConfiguration["fallbackLink"] as? String ?? ""
+        let linkServer = providerConfiguration["linkServer"] as? String ?? ""
 
         // Check for auto-refreshed links from previous session
         if let groupID = SharedLogger.appGroupID,
@@ -133,7 +135,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
 
         DispatchQueue.global(qos: .userInteractive).async {
-            StartProxy(vkLink, peerAddr, listenAddr, nValue)
+            StartProxy(vkLink, fallbackLink, peerAddr, listenAddr, nValue, linkServer)
         }
 
         DispatchQueue.global(qos: .userInteractive).async { [weak self] in

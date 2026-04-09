@@ -495,19 +495,32 @@ func oneDtlsConnection(ctx context.Context, peer *net.UDPAddr, listenConn net.Pa
 
 	wg := sync.WaitGroup{}
 	wg.Add(2)
+	// Only set deadline on dtlsConn — listenConn is shared across all streams,
+	// setting its deadline would cascade-kill every other DTLS goroutine.
 	context.AfterFunc(dtlsctx, func() {
-		listenConn.SetDeadline(time.Now())
 		dtlsConn.SetDeadline(time.Now())
 	})
 	var addr atomic.Value
-	// Hot path: no select on ctx — deadline is set via context.AfterFunc above
+	// listenConn → dtlsConn: use select on ctx instead of shared deadline
 	go func() {
 		defer wg.Done()
 		defer dtlscancel()
 		buf := make([]byte, 65535)
 		for {
+			select {
+			case <-dtlsctx.Done():
+				return
+			default:
+			}
 			n, addr1, err1 := listenConn.ReadFrom(buf)
 			if err1 != nil {
+				// Check if our context is done (not a shared socket error)
+				select {
+				case <-dtlsctx.Done():
+					return
+				default:
+				}
+				// Shared listenConn error from parent context — exit
 				return
 			}
 			addr.Store(addr1)
@@ -517,6 +530,7 @@ func oneDtlsConnection(ctx context.Context, peer *net.UDPAddr, listenConn net.Pa
 		}
 	}()
 
+	// dtlsConn → listenConn: deadline on dtlsConn is safe (not shared)
 	go func() {
 		defer wg.Done()
 		defer dtlscancel()
@@ -537,7 +551,6 @@ func oneDtlsConnection(ctx context.Context, peer *net.UDPAddr, listenConn net.Pa
 	}()
 
 	wg.Wait()
-	listenConn.SetDeadline(time.Time{})
 	dtlsConn.SetDeadline(time.Time{})
 }
 

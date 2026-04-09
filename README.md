@@ -15,8 +15,8 @@
 Туннелирует WireGuard через **TURN-серверы MAX** (ex VK Teams / ICQ New, инфраструктура OK.ru) — трафик выглядит как видеозвонок MAX.
 
 Добавлено:
-- Полный auth flow через OneMe WebSocket API + Calls API (fb.do)
-- Получение TURN credentials через `joinConversationByLink` (не требует дружбы)
+- Полный auth flow через WebSocket API + Calls API 
+- Получение TURN credentials  
 - CreatePermission на произвольные IP — разрешён
 - Бейдж провайдера в приложении (cyan)
 

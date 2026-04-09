@@ -1,112 +1,93 @@
 # TurnBridge
 
-**TurnBridge** is annetwork utility. It allows you to securely route your iOS network traffic through TURN servers and WireGuard / Amnezia WG endpoints.
+**TurnBridge** — сетевая утилита для iOS. Позволяет маршрутизировать трафик через TURN-серверы и WireGuard / Amnezia WG эндпоинты, маскируя его под легитимный трафик российских платформ.
 
-To run the application, you must use a [server](https://github.com/cacggghp/vk-turn-proxy/releases/tag/v1.0.0) running on a VPS.
-
-The project is based on the repositories listed in the **Acknowledgments** section.
-
-## 🔒 Tunnel Providers
-
-TurnBridge supports multiple WebRTC/TURN tunnel backends, each disguising WireGuard traffic as legitimate platform traffic:
-
-### SberJazz / SaluteJazz
-Tunnels WireGuard through **SberJazz WebRTC datachannels** — traffic looks like a Sber video call. No direct UDP to the server. Works in heavily filtered networks.
-
-Set `turn` to the Jazz room link printed by `jazz-turn-proxy`, e.g. `https://salutejazz.ru/call/ROOM_ID/PASSWORD`. Leave `peer` empty — the server-side proxy already knows the WireGuard endpoint.
-
-> **Server component required.**
-> Due to ongoing blocking in Russia, the `jazz-turn-proxy` server binary is distributed privately for a small fee.
-> Contact **[@ilkl34](https://t.me/ilkl34)** on Telegram.
-
-### Wildberries (WB)
-Tunnels WireGuard through **Wildberries TURN servers** — traffic looks like WB video streaming.
-
-Set `turn` to `wb` and `peer` to your VPS address with the vk-turn-proxy port (e.g. `158.160.x.x:56000`).
-
-### VK (VKontakte)
-The original backend — tunnels through **VK TURN servers** using DTLS. Traffic looks like a VK video call.
-
-Set `turn` to a VK call join link and `peer` to your VPS address with vk-turn-proxy port.
-
+> **Важно:** Часть критичных файлов (модули SberJazz и Telemost) удалена из публичного репозитория во избежание блокировок сервисов. Полная версия с поддержкой всех провайдеров доступна за символическую плату.
+>
+> Контакт: **[@ilkl34](https://t.me/ilkl34)** в Telegram
 
 ---
 
-## ✨ Features
+## Провайдеры туннелей
 
-* **Multiple Tunnel Backends:** Jazz (SberJazz), WB (Wildberries), and VK TURN — all disguising traffic as legitimate Russian platform traffic.
-* **WireGuard & Amnezia WG Integration:**
-  - Complete WireGuard protocol support with key management, routing, and DNS configuration
-  - Full Amnezia WireGuard obfuscation support including jitter parameters (Jc, Jmin, Jmax), packet size obfuscation (S1-S4), and magic headers (H1-H4)
-* **1-Click Import:** Quickly import complex configurations via base64-encoded clipboard links (`turnbridge://`).
-* **Multi-Profile Management:** Create, edit (swipe left), and switch between multiple VPN profiles — each showing its provider (Jazz / VK / WB) with a color badge.
-* **Redesigned UI:** Live connection uptime timer, per-provider color badges, swipe-to-delete profiles, animated connection orb.
+### SberJazz / SaluteJazz
 
-## 📸 Screenshot
-![Main Screen](IMG_1662.jpeg)
+Туннелирует WireGuard через **WebRTC DataChannel SberJazz** — трафик выглядит как видеозвонок Сбера. Работает в сетях с жёсткой фильтрацией.
 
-## 🚀 Installation & Build
+В поле `turn` указывается ссылка на комнату Jazz от `jazz-turn-proxy`. Поле `peer` оставить пустым.
 
-To build and run TurnBridge locally, you need a macOS environment with Xcode installed, as well as Go (for compiling the WireGuard/TURN bridge).
+> **Требуется серверный компонент.** Контакт: **[@ilkl34](https://t.me/ilkl34)**
 
-> ⚠️ **Important:** TurnBridge uses a Network Extension (VPN). Signing with a **free Apple ID** (via standard AltStore or Sideloadly) **will not work** because free accounts lack the required VPN entitlements. You must use a paid Apple Developer account ($99/year) or a third-party paid signing service.
+### Telemost (Яндекс Телемост)
 
-1. **Clone the repository:**
-   ```bash
-   git clone https://github.com/nullcstring/turnbridge.git
-   cd TurnBridge
-   ```
+Туннелирует WireGuard через **WebRTC DataChannel Телемоста** — трафик выглядит как видеозвонок Яндекса.
 
-2. **Build the Go Bridge:**
-Ensure you have Go installed (`brew install go`).
+> **Требуется серверный компонент.** Контакт: **[@ilkl34](https://t.me/ilkl34)**
 
-Modify the Go path in the script at script/build_wireguard_go_bridge.sh, according to your setup. Refer to [this Stack Overflow answer](https://stackoverflow.com/a/64212121) for guidance.
+### Wildberries (WB)
 
-3. **Open the project in Xcode:**
-Open `TurnBridge.xcodeproj` (or `.xcworkspace` if applicable) in Xcode.
-4. **Configure Code Signing:**
-* Select the `TurnBridge` project in the Project Navigator.
-* Go to the **Signing & Capabilities** tab.
-* Select your personal Apple Developer Team.
-* Ensure you update the Bundle Identifier (for both the main app and the `network-extension` target) to match your team provisioning profile.
+Туннелирует через **TURN-серверы Wildberries** — трафик выглядит как видеостриминг WB.
 
-5. **Build and Run:**
-Select your target device (iPhone/iPad) and press `Cmd + R` to build and run the app.
+`turn` = `wb`, `peer` = адрес VPS с портом vk-turn-proxy (например `158.160.x.x:56000`).
 
-## 📲 Install Pre-built IPA (No Xcode Required)
+### VK (ВКонтакте)
 
-If you don't have a Mac or Xcode, you can download the pre-built unsigned IPA from the [Releases](https://github.com/nullcstring/turnbridge/releases) page and sign it yourself.
+Оригинальный бэкенд — через **TURN-серверы ВКонтакте** по DTLS. Трафик выглядит как видеозвонок VK.
 
-### Signing & Installation
+`turn` = ссылка на VK-звонок, `peer` = адрес VPS с портом vk-turn-proxy.
 
-**Manual Installation Tools:**
-If you already possess a paid Apple Developer certificate (or bought one from the services above), you can sign and install the IPA yourself using:
+---
 
-| Tool | Requirement |
-|------|-------------|
-| [KravaSign](https://www.kravasign.com/) | ⚠️ Without a developer certificate, price $10 https://github.com/nullcstring/turnbridge/issues/2#issuecomment-4129716584 |
-| [GBox](https://gbox.run) | Paid Certificate Needed |
-| [ESign](https://esign.yyyue.xyz) | Paid Certificate Needed |
+## Возможности
 
+* **Несколько бэкендов:** Jazz, Telemost, WB и VK
+* **WireGuard и Amnezia WG:** полная поддержка включая обфускацию (Jc, Jmin, Jmax, S1-S4, H1-H4)
+* **Импорт в 1 клик:** ссылки `turnbridge://` из буфера обмена
+* **Мультипрофиль:** несколько VPN-профилей с цветными бейджами провайдеров
+* **Автоматическое решение капчи VK:** встроенный солвер слайдер-капчи
 
-## 🛠 Usage (Configuration Import)
+## Скриншот
+![Главный экран](IMG_1662.jpeg)
 
-TurnBridge uses a specific JSON structure encoded in Base64 for fast configuration imports for WireGuard / Amnezia WG.
+---
 
-### Configuration JSON Structure
+## Сборка
 
-The `turn` field selects both the backend and the room:
+Нужен macOS + Xcode + Go.
 
-| Backend | `turn` value | `peer` value |
-|---------|-------------|--------------|
-| Jazz    | `https://salutejazz.ru/call/ROOM_ID/PASSWORD` | *(empty)* |
-| WB      | `wb` | `YOUR_VPS_IP:56000` |
-| VK      | `https://vk.com/call/join/LINK_ID` | `YOUR_VPS_IP:56000` |
+> **Важно:** Подпись через бесплатный Apple ID **не работает** — нужен платный Apple Developer ($99/год) или сторонний сервис подписи.
+
+1. Клон: `git clone https://github.com/ilyagenius/turnbridge.git && cd turnbridge`
+2. Собрать Go Bridge: поправить путь в `script/build_wireguard_go_bridge.sh`
+3. Открыть `TurnBridge.xcodeproj` в Xcode
+4. Настроить подпись (Signing & Capabilities)
+5. `Cmd + R`
+
+## Установка готового IPA
+
+Скачать со страницы [Releases](https://github.com/ilyagenius/turnbridge/releases).
+
+| Инструмент | Требования |
+|-----------|-----------|
+| [KravaSign](https://www.kravasign.com/) | Без сертификата — $10 |
+| [GBox](https://gbox.run) | Нужен платный сертификат |
+| [ESign](https://esign.yyyue.xyz) | Нужен платный сертификат |
+
+---
+
+## Настройка
+
+| Бэкенд | `turn` | `peer` |
+|--------|--------|--------|
+| Jazz | `https://salutejazz.ru/calls/ROOM_ID?psw=PASSWORD` | *(пусто)* |
+| Telemost | `https://telemost.yandex.ru/j/ROOM_ID` | *(пусто)* |
+| WB | `wb` | `IP_VPS:56000` |
+| VK | `https://vk.com/call/join/LINK_ID` | `IP_VPS:56000` |
 
 ```json
 {
-  "name": "My Server",
-  "turn": "https://salutejazz.ru/call/ROOM_ID/PASSWORD",
+  "name": "Мой сервер",
+  "turn": "https://salutejazz.ru/calls/ROOM_ID?psw=PASSWORD",
   "peer": "",
   "listen": "127.0.0.1:9000",
   "n": 1,
@@ -114,56 +95,21 @@ The `turn` field selects both the backend and the room:
 }
 ```
 
-> For Jazz mode the `peer` field must be **empty** — the server-side `jazz-turn-proxy` already knows the WireGuard endpoint.  
-> For WB/VK mode `peer` points to your VPS running `vk-turn-proxy` (default port `56000`).
-
-### Generate a Quick Import Link
-
-You can use the included `quick_link.py` script to easily generate valid `turnbridge://` clipboard links.
-
-Fill in the `config` dict with your chosen provider settings (see table above), then run:
-
-1. Open `quick_link.py` in your text editor and replace the placeholder values in the `config` dictionary with your actual server parameters and WireGuard keys.
-2. Run the script from your terminal:
-   ```bash
-   python3 quick_link.py
-   ```
-
-3. Copy the generated `turnbridge://...` link from the terminal output to your iOS clipboard.
-4. Open TurnBridge, tap the `+` icon, select **Paste from Clipboard**, and tap **Connect**.
-
-## ☕ Support My Work
-
-If TurnBridge saved you some time, consider supporting its development! As an independent open-source project, any contribution is greatly appreciated.
-
-**Crypto:**
-* **TON:** `UQBisIcwzfQz5Rj0TofZhN2CSZXvUhQrwMmTGEiSSa9ErW5b`
-
-Thank you for keeping the open-source spirit alive! 🚀
-
-## License
-
-TurnBridge is released under the [GNU General Public License v3.0](LICENSE).
-
-Copyright (C) 2026 nullcstring
-
-This program is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
+Быстрая ссылка: `python3 quick_link.py` → скопировать `turnbridge://...` → в TurnBridge нажать `+` → **Вставить из буфера**
 
 ---
-## Acknowledgements
 
-This project was made possible thanks to the work of the open-source community. It includes code and concepts from the following excellent repositories:
+## Поддержать проект
 
-* [WireGuard-Apple](https://github.com/ut360e/wireguard-apple) — Licensed under MIT / GPL.
-* [Wireguardkit](https://github.com/Shahzainali/Wireguardkit) — Licensed under MIT / GPL.
-* [vk-turn-proxy](https://github.com/cacggghp/vk-turn-proxy) — Licensed under the GNU GPL.
-* [Amneziawg-Apple](https://github.com/amnezia-vpn/amneziawg-apple.git) — Licensed under MIT.
+**TON:** `UQBisIcwzfQz5Rj0TofZhN2CSZXvUhQrwMmTGEiSSa9ErW5b`
 
+## Лицензия
+
+[GNU General Public License v3.0](LICENSE)
+
+## Благодарности
+
+* [WireGuard-Apple](https://github.com/ut360e/wireguard-apple) — MIT / GPL
+* [Wireguardkit](https://github.com/Shahzainali/Wireguardkit) — MIT / GPL
+* [vk-turn-proxy](https://github.com/cacggghp/vk-turn-proxy) — GNU GPL
+* [Amneziawg-Apple](https://github.com/amnezia-vpn/amneziawg-apple.git) — MIT

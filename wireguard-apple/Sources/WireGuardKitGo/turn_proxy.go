@@ -427,7 +427,7 @@ func dtlsFunc(ctx context.Context, conn net.PacketConn, peer *net.UDPAddr) (net.
 	return dtlsConn, nil
 }
 
-func oneDtlsConnection(ctx context.Context, peer *net.UDPAddr, listenConn net.PacketConn, connchan chan<- net.PacketConn, okchan chan<- struct{}, singleShot bool, sessionID []byte, streamID byte, c1 chan<- error) {
+func oneDtlsConnection(ctx context.Context, peer *net.UDPAddr, inChan <-chan []byte, wgAddr *atomic.Value, listenConn net.PacketConn, connchan chan<- net.PacketConn, okchan chan<- struct{}, singleShot bool, sessionID []byte, streamID byte, c1 chan<- error) {
 	var err error = nil
 	defer func() { c1 <- err }()
 	dtlsctx, dtlscancel := context.WithCancel(ctx)
@@ -461,9 +461,9 @@ func oneDtlsConnection(ctx context.Context, peer *net.UDPAddr, listenConn net.Pa
 			err = fmt.Errorf("failed to close DTLS connection: %s", closeErr)
 			return
 		}
-		log.Printf("Closed DTLS connection\n")
+		log.Printf("Closed DTLS connection (stream %d)\n", streamID)
 	}()
-	log.Printf("Established DTLS connection!\n")
+	log.Printf("Established DTLS connection (stream %d)!\n", streamID)
 
 	// proxy_v2: send 17-byte session header [16 UUID + 1 stream ID]
 	if len(sessionID) == 16 {
@@ -495,42 +495,30 @@ func oneDtlsConnection(ctx context.Context, peer *net.UDPAddr, listenConn net.Pa
 
 	wg := sync.WaitGroup{}
 	wg.Add(2)
-	// Only set deadline on dtlsConn — listenConn is shared across all streams,
-	// setting its deadline would cascade-kill every other DTLS goroutine.
 	context.AfterFunc(dtlsctx, func() {
 		dtlsConn.SetDeadline(time.Now())
 	})
-	var addr atomic.Value
-	// listenConn → dtlsConn: use select on ctx instead of shared deadline
+
+	// Upstream: inChan (from dispatcher) → dtlsConn
 	go func() {
 		defer wg.Done()
 		defer dtlscancel()
-		buf := make([]byte, 65535)
 		for {
 			select {
 			case <-dtlsctx.Done():
 				return
-			default:
-			}
-			n, addr1, err1 := listenConn.ReadFrom(buf)
-			if err1 != nil {
-				// Check if our context is done (not a shared socket error)
-				select {
-				case <-dtlsctx.Done():
+			case pkt, ok := <-inChan:
+				if !ok {
 					return
-				default:
 				}
-				// Shared listenConn error from parent context — exit
-				return
-			}
-			addr.Store(addr1)
-			if _, err1 = dtlsConn.Write(buf[:n]); err1 != nil {
-				return
+				if _, err1 := dtlsConn.Write(pkt); err1 != nil {
+					return
+				}
 			}
 		}
 	}()
 
-	// dtlsConn → listenConn: deadline on dtlsConn is safe (not shared)
+	// Downstream: dtlsConn → listenConn (WriteTo is safe on shared socket)
 	go func() {
 		defer wg.Done()
 		defer dtlscancel()
@@ -540,9 +528,9 @@ func oneDtlsConnection(ctx context.Context, peer *net.UDPAddr, listenConn net.Pa
 			if err1 != nil {
 				return
 			}
-			addr1, ok := addr.Load().(net.Addr)
+			addr1, ok := wgAddr.Load().(net.Addr)
 			if !ok {
-				return
+				continue // no WG peer yet, drop
 			}
 			if _, err1 = listenConn.WriteTo(buf[:n], addr1); err1 != nil {
 				return
@@ -770,17 +758,17 @@ func oneTurnConnection(ctx context.Context, turnParams *turnParams, peer *net.UD
 	}
 }
 
-func oneDtlsConnectionLoop(ctx context.Context, peer *net.UDPAddr, listenConnChan <-chan net.PacketConn, connchan chan<- net.PacketConn, okchan chan<- struct{}, singleShot bool, sessionID []byte, streamID byte) {
+func oneDtlsConnectionLoop(ctx context.Context, peer *net.UDPAddr, inChan <-chan []byte, wgAddr *atomic.Value, listenConn net.PacketConn, connchan chan<- net.PacketConn, okchan chan<- struct{}, singleShot bool, sessionID []byte, streamID byte) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case listenConn := <-listenConnChan:
-			c := make(chan error)
-			go oneDtlsConnection(ctx, peer, listenConn, connchan, okchan, singleShot, sessionID, streamID, c)
-			if err := <-c; err != nil {
-				log.Printf("%s", err)
-			}
+		default:
+		}
+		c := make(chan error)
+		go oneDtlsConnection(ctx, peer, inChan, wgAddr, listenConn, connchan, okchan, singleShot, sessionID, streamID, c)
+		if err := <-c; err != nil {
+			log.Printf("stream %d: %s", streamID, err)
 		}
 	}
 }
@@ -980,7 +968,6 @@ func StartProxy(cLink *C.char, cPeerAddr *C.char, cLocalAddr *C.char, cN C.int) 
 		onAllocate: onAllocate,
 	}
 
-	listenConnChan := make(chan net.PacketConn)
 	listenConn, err := net.ListenPacket("udp", localAddrStr)
 	if err != nil {
 		log.Printf("Failed to listen: %s", err)
@@ -998,13 +985,37 @@ func StartProxy(cLink *C.char, cPeerAddr *C.char, cLocalAddr *C.char, cN C.int) 
 		}
 	})
 
+	// Create per-stream channels for round-robin packet dispatch
+	inChans := make([]chan []byte, n)
+	for i := range inChans {
+		inChans[i] = make(chan []byte, 64)
+	}
+	var wgAddr atomic.Value
+
+	// Dispatcher: single reader on listenConn, round-robin to streams
 	go func() {
+		buf := make([]byte, 65535)
+		idx := 0
 		for {
-			select {
-			case <-ctx.Done():
+			nr, addr, err := listenConn.ReadFrom(buf)
+			if err != nil {
 				return
-			case listenConnChan <- listenConn:
 			}
+			wgAddr.Store(addr)
+			pkt := make([]byte, nr)
+			copy(pkt, buf[:nr])
+			// Round-robin: try each stream, send to first available
+			for attempts := 0; attempts < n; attempts++ {
+				select {
+				case inChans[idx%n] <- pkt:
+					idx++
+					goto dispatched
+				default:
+					idx++ // stream full, try next
+				}
+			}
+			// All streams full — drop packet (backpressure)
+		dispatched:
 		}
 	}()
 
@@ -1015,7 +1026,7 @@ func StartProxy(cLink *C.char, cPeerAddr *C.char, cLocalAddr *C.char, cN C.int) 
 	connchan := make(chan net.PacketConn)
 
 	wg1.Go(func() {
-		oneDtlsConnectionLoop(ctx, peer, listenConnChan, connchan, okchan, params.singleShot, sessionID, 0)
+		oneDtlsConnectionLoop(ctx, peer, inChans[0], &wgAddr, listenConn, connchan, okchan, params.singleShot, sessionID, 0)
 	})
 	wg1.Go(func() {
 		oneTurnConnectionLoop(ctx, params, peer, connchan, t)
@@ -1030,14 +1041,14 @@ func StartProxy(cLink *C.char, cPeerAddr *C.char, cLocalAddr *C.char, cN C.int) 
 		cChan := make(chan net.PacketConn)
 		streamIdx := byte(i + 1)
 		wg1.Go(func() {
-			oneDtlsConnectionLoop(ctx, peer, listenConnChan, cChan, nil, params.singleShot, sessionID, streamIdx)
+			oneDtlsConnectionLoop(ctx, peer, inChans[streamIdx], &wgAddr, listenConn, cChan, nil, params.singleShot, sessionID, streamIdx)
 		})
 		wg1.Go(func() {
 			oneTurnConnectionLoop(ctx, params, peer, cChan, t)
 		})
 	}
 
-	log.Printf("Proxy started on %s", localAddrStr)
+	log.Printf("Proxy started on %s with %d streams (round-robin dispatch)", localAddrStr, n)
 	wg1.Wait()
 }
 

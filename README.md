@@ -39,13 +39,6 @@ docker build -t vk-proxy-v2 .
 docker run -d --restart always --network host vk-proxy-v2 -listen 0.0.0.0:56000 -connect 127.0.0.1:51820
 ```
 
-### Wildberries (WB)
-
-Туннелирует через **TURN-серверы Wildberries** — трафик выглядит как видеостриминг WB.
-
-`turn` = `wb`, `peer` = адрес VPS с портом vk-turn-proxy (например `158.160.x.x:56000`).
-### НА ДАННЫЙ МОМЕНТ ЗАБЛОКИРОВАНО, РАЗБИРАЮСЬ.
-
 ### SberJazz / SaluteJazz
 
 Туннелирует WireGuard через **WebRTC DataChannel SberJazz** — трафик выглядит как видеозвонок Сбера. Работает в сетях с жёсткой фильтрацией.
@@ -59,6 +52,14 @@ docker run -d --restart always --network host vk-proxy-v2 -listen 0.0.0.0:56000 
 Туннелирует WireGuard через **WebRTC DataChannel Телемоста** — трафик выглядит как видеозвонок Яндекса.
 
 > **Требуется серверный компонент.** Контакт: **[@ilkl34](https://t.me/ilkl34)**
+
+### Wildberries (WB)
+
+Туннелирует через **TURN-серверы Wildberries** — трафик выглядит как видеостриминг WB.
+
+`turn` = `wb`, `peer` = адрес VPS с портом vk-turn-proxy (например `158.160.x.x:56000`).
+
+> **На данный момент заблокировано.**
 
 ---
 

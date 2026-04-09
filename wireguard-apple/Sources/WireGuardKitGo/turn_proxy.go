@@ -952,20 +952,38 @@ func StartProxy(cLink *C.char, cPeerAddr *C.char, cLocalAddr *C.char, cN C.int) 
 			log.Printf("Resolve UDP error: %v", err)
 			return
 		}
-		parts := strings.Split(link, "join/")
-		link = parts[len(parts)-1]
-		if idx := strings.IndexAny(link, "/?#"); idx != -1 {
-			link = link[:idx]
-		}
 	}
 
-	params := &turnParams{
-		host:       host,
-		port:       port,
-		link:       link,
-		udp:        udp,
-		getCreds:   poolCreds(credFunc, n),
-		onAllocate: onAllocate,
+	// Multi-room support: comma-separated VK links → separate turnParams per room
+	var paramsList []*turnParams
+	if credFunc == getCreds {
+		vkLinks := strings.Split(link, ",")
+		streamsPerRoom := (n + len(vkLinks) - 1) / len(vkLinks)
+		for _, l := range vkLinks {
+			l = strings.TrimSpace(l)
+			parts := strings.Split(l, "join/")
+			l = parts[len(parts)-1]
+			if idx := strings.IndexAny(l, "/?#"); idx != -1 {
+				l = l[:idx]
+			}
+			paramsList = append(paramsList, &turnParams{
+				host:     host,
+				port:     port,
+				link:     l,
+				udp:      udp,
+				getCreds: poolCreds(credFunc, streamsPerRoom),
+			})
+		}
+		log.Printf("VK: %d room(s), ~%d streams per room", len(paramsList), streamsPerRoom)
+	} else {
+		paramsList = []*turnParams{{
+			host:       host,
+			port:       port,
+			link:       link,
+			udp:        udp,
+			getCreds:   poolCreds(credFunc, n),
+			onAllocate: onAllocate,
+		}}
 	}
 
 	listenConn, err := net.ListenPacket("udp", localAddrStr)
@@ -1026,10 +1044,10 @@ func StartProxy(cLink *C.char, cPeerAddr *C.char, cLocalAddr *C.char, cN C.int) 
 	connchan := make(chan net.PacketConn)
 
 	wg1.Go(func() {
-		oneDtlsConnectionLoop(ctx, peer, inChans[0], &wgAddr, listenConn, connchan, okchan, params.singleShot, sessionID, 0)
+		oneDtlsConnectionLoop(ctx, peer, inChans[0], &wgAddr, listenConn, connchan, okchan, paramsList[0].singleShot, sessionID, 0)
 	})
 	wg1.Go(func() {
-		oneTurnConnectionLoop(ctx, params, peer, connchan, t)
+		oneTurnConnectionLoop(ctx, paramsList[0], peer, connchan, t)
 	})
 
 	select {
@@ -1040,15 +1058,16 @@ func StartProxy(cLink *C.char, cPeerAddr *C.char, cLocalAddr *C.char, cN C.int) 
 	for i := 0; i < n-1; i++ {
 		cChan := make(chan net.PacketConn)
 		streamIdx := byte(i + 1)
+		p := paramsList[int(streamIdx)%len(paramsList)]
 		wg1.Go(func() {
-			oneDtlsConnectionLoop(ctx, peer, inChans[streamIdx], &wgAddr, listenConn, cChan, nil, params.singleShot, sessionID, streamIdx)
+			oneDtlsConnectionLoop(ctx, peer, inChans[streamIdx], &wgAddr, listenConn, cChan, nil, p.singleShot, sessionID, streamIdx)
 		})
 		wg1.Go(func() {
-			oneTurnConnectionLoop(ctx, params, peer, cChan, t)
+			oneTurnConnectionLoop(ctx, p, peer, cChan, t)
 		})
 	}
 
-	log.Printf("Proxy started on %s with %d streams (round-robin dispatch)", localAddrStr, n)
+	log.Printf("Proxy started on %s with %d streams across %d room(s)", localAddrStr, n, len(paramsList))
 	wg1.Wait()
 }
 

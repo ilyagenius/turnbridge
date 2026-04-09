@@ -87,16 +87,15 @@ type maxStartedConversation struct {
 }
 
 // getCredsMAX fetches TURN credentials from MAX/OK.ru infrastructure.
-// link format:
-//   "<login_token>"              — self-call mode (auto-discover target)
-//   "<login_token>|<target_id>"  — explicit target
+// link format: "<login_token>|<join_link_id>"
+// join_link_id is from MAX call link: https://max.ru/joincall/<join_link_id>
 func getCredsMAX(link string) (string, string, string, error) {
-	loginToken := link
-	explicitTarget := ""
-	if idx := strings.LastIndex(link, "|"); idx > 0 && idx < len(link)-1 {
-		loginToken = link[:idx]
-		explicitTarget = link[idx+1:]
+	idx := strings.LastIndex(link, "|")
+	if idx <= 0 || idx >= len(link)-1 {
+		return "", "", "", fmt.Errorf("MAX link must be '<login_token>|<join_link_id>'")
 	}
+	loginToken := link[:idx]
+	joinLink := link[idx+1:]
 
 	log.Printf("[MAX] Connecting to OneMe WebSocket...")
 
@@ -107,24 +106,17 @@ func getCredsMAX(link string) (string, string, string, error) {
 	}
 	log.Printf("[MAX] Got call token")
 
-	// Step 2: auth.anonymLogin on fb.do → session_key + external_user_id
+	// Step 2: auth.anonymLogin on fb.do → session_key
 	login, err := maxCallsLogin(callToken)
 	if err != nil {
 		return "", "", "", fmt.Errorf("calls login: %w", err)
 	}
-	log.Printf("[MAX] Logged in (uid=%s, extId=%s)", login.UID, login.ExternalUserID)
+	log.Printf("[MAX] Logged in (uid=%s)", login.UID)
 
-	// Determine target: explicit or self-call
-	targetID := explicitTarget
-	if targetID == "" {
-		targetID = login.ExternalUserID
-		log.Printf("[MAX] Self-call mode (target=%s)", targetID)
-	}
-
-	// Step 3: vchat.startConversation on fb.do → TURN creds
-	user, pass, addr, err := maxStartConversation(login.SessionKey, targetID)
+	// Step 3: vchat.joinConversationByLink on fb.do → TURN creds
+	user, pass, addr, err := maxJoinByLink(login.SessionKey, joinLink)
 	if err != nil {
-		return "", "", "", fmt.Errorf("start conversation: %w", err)
+		return "", "", "", fmt.Errorf("join by link: %w", err)
 	}
 	log.Printf("[MAX] Got TURN server: %s", addr)
 
@@ -277,20 +269,16 @@ func maxCallsLogin(callToken string) (*maxLoginData, error) {
 	return &login, nil
 }
 
-// maxStartConversation calls vchat.startConversation and returns TURN credentials
-func maxStartConversation(sessionKey, targetID string) (string, string, string, error) {
-	payloadJSON, _ := json.Marshal(map[string]bool{"is_video": false})
-
+// maxJoinByLink calls vchat.joinConversationByLink and returns TURN credentials
+func maxJoinByLink(sessionKey, joinLink string) (string, string, string, error) {
 	body := url.Values{
-		"method":          {"vchat.startConversation"},
+		"method":          {"vchat.joinConversationByLink"},
 		"format":          {"JSON"},
 		"application_key": {maxApplicationKey},
 		"session_key":     {sessionKey},
-		"conversationId":  {uuid.NewString()},
+		"joinLink":        {joinLink},
 		"isVideo":         {"false"},
 		"protocolVersion": {"5"},
-		"payload":         {string(payloadJSON)},
-		"externalIds":     {targetID},
 	}
 
 	resp, err := maxPost(body)
@@ -299,7 +287,7 @@ func maxStartConversation(sessionKey, targetID string) (string, string, string, 
 	}
 	var conv maxStartedConversation
 	if err := json.Unmarshal(resp, &conv); err != nil {
-		return "", "", "", fmt.Errorf("parse conversation: %w (body: %s)", err, string(resp))
+		return "", "", "", fmt.Errorf("parse response: %w (body: %s)", err, string(resp))
 	}
 	if conv.TurnServer.Username == "" {
 		return "", "", "", fmt.Errorf("no TURN credentials in response: %s", string(resp))

@@ -37,11 +37,28 @@
 
 > **Требуется серверный компонент.** Контакт: **[@ilkl34](https://t.me/ilkl34)**
 
+### FUCK MAX
+
+Туннелирует WireGuard через **TURN-серверы MAX** (ex VK Teams / ICQ New, инфраструктура OK.ru) — трафик выглядит как видеозвонок MAX.
+
+Добавлено:
+- Полный auth flow через OneMe WebSocket API + Calls API (fb.do)
+- Получение TURN credentials через `joinConversationByLink` (не требует дружбы)
+- CreatePermission на произвольные IP — разрешён
+- Бейдж провайдера в приложении (cyan)
+
+**Serverless** — серверный компонент НЕ нужен. MAX TURN-серверы напрямую релеят трафик на ваш VPS.
+
+`turn` = `max:<login_token>|<join_link_id>`, `peer` = адрес VPS с портом (например `158.160.x.x:56000`).
+
+> **Как получить токен:** залогиниться в `web.max.ru` через QR → DevTools → WS → opcode 19 → `token`.
+> **Как получить join_link_id:** создать звонок в MAX → скопировать ссылку → часть после `/joincall/`.
+
 ---
 
 ## Возможности
 
-* **Несколько бэкендов:** Jazz, Telemost, WB и VK
+* **Несколько бэкендов:** Jazz, Telemost, WB, VK и MAX
 * **WireGuard и Amnezia WG:** полная поддержка включая обфускацию (Jc, Jmin, Jmax, S1-S4, H1-H4)
 * **Импорт в 1 клик:** ссылки `turnbridge://` из буфера обмена
 * **Мультипрофиль:** несколько VPN-профилей с цветными бейджами провайдеров
@@ -84,6 +101,7 @@
 | WB | `wb` | `IP_VPS:56000` |
 | Jazz | `https://salutejazz.ru/calls/ROOM_ID?psw=PASSWORD` | *(пусто)* |
 | Telemost | `https://telemost.yandex.ru/j/ROOM_ID` | *(пусто)* |
+| MAX | `max:<login_token>\|<join_link_id>` | `IP_VPS:56000` |
 
 ```json
 {

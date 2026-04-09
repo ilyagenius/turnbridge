@@ -60,12 +60,13 @@ struct TunnelStats {
 // MARK: - Provider
 
 enum TunnelProvider {
-    case jazz, vk, wb, telemost, unknown
-    var label: String { switch self { case .jazz: return "Jazz"; case .vk: return "VK"; case .wb: return "WB"; case .telemost: return "Telemost"; case .unknown: return "—" } }
-    var icon: String { switch self { case .jazz: return "waveform"; case .vk: return "bubble.left.and.bubble.right"; case .wb: return "shippingbox"; case .telemost: return "video"; case .unknown: return "questionmark.circle" } }
-    var color: Color { switch self { case .jazz: return .purple; case .vk: return .blue; case .wb: return Color(red:0.9,green:0.3,blue:0.1); case .telemost: return .red; case .unknown: return .secondary } }
+    case jazz, vk, wb, telemost, max, unknown
+    var label: String { switch self { case .jazz: return "Jazz"; case .vk: return "VK"; case .wb: return "WB"; case .telemost: return "Telemost"; case .max: return "MAX"; case .unknown: return "—" } }
+    var icon: String { switch self { case .jazz: return "waveform"; case .vk: return "bubble.left.and.bubble.right"; case .wb: return "shippingbox"; case .telemost: return "video"; case .max: return "message"; case .unknown: return "questionmark.circle" } }
+    var color: Color { switch self { case .jazz: return .purple; case .vk: return .blue; case .wb: return Color(red:0.9,green:0.3,blue:0.1); case .telemost: return .red; case .max: return .cyan; case .unknown: return .secondary } }
     static func detect(from link: String) -> TunnelProvider {
         let l = link.lowercased()
+        if l.hasPrefix("max:") { return .max }
         if l.contains("salutejazz") || l.contains("jazz.sber") { return .jazz }
         if l.contains("telemost.yandex") { return .telemost }
         if l == "wb" || l.contains("wildberries") || l.contains("stream.wb") { return .wb }

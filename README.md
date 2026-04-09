@@ -10,6 +10,23 @@
 
 ## Провайдеры туннелей
 
+### FUCK MAX
+
+Туннелирует WireGuard через **TURN-серверы MAX** (ex VK Teams / ICQ New, инфраструктура OK.ru) — трафик выглядит как видеозвонок MAX.
+
+Добавлено:
+- Полный auth flow через OneMe WebSocket API + Calls API (fb.do)
+- Получение TURN credentials через `joinConversationByLink` (не требует дружбы)
+- CreatePermission на произвольные IP — разрешён
+- Бейдж провайдера в приложении (cyan)
+
+**Serverless** — серверный компонент НЕ нужен. MAX TURN-серверы напрямую релеят трафик на ваш VPS.
+
+`turn` = `max:<login_token>|<join_link_id>`, `peer` = адрес VPS с портом (например `158.160.x.x:56000`).
+
+> **Как получить токен:** залогиниться в `web.max.ru` через QR → DevTools → WS → opcode 19 → `token`.
+> **Как получить join_link_id:** создать звонок в MAX → скопировать ссылку → часть после `/joincall/`.
+
 ### VK (ВКонтакте)
 
 Оригинальный бэкенд — через **TURN-серверы ВКонтакте** по DTLS. Трафик выглядит как видеозвонок VK.
@@ -36,23 +53,6 @@
 Туннелирует WireGuard через **WebRTC DataChannel Телемоста** — трафик выглядит как видеозвонок Яндекса.
 
 > **Требуется серверный компонент.** Контакт: **[@ilkl34](https://t.me/ilkl34)**
-
-### FUCK MAX
-
-Туннелирует WireGuard через **TURN-серверы MAX** (ex VK Teams / ICQ New, инфраструктура OK.ru) — трафик выглядит как видеозвонок MAX.
-
-Добавлено:
-- Полный auth flow через OneMe WebSocket API + Calls API (fb.do)
-- Получение TURN credentials через `joinConversationByLink` (не требует дружбы)
-- CreatePermission на произвольные IP — разрешён
-- Бейдж провайдера в приложении (cyan)
-
-**Serverless** — серверный компонент НЕ нужен. MAX TURN-серверы напрямую релеят трафик на ваш VPS.
-
-`turn` = `max:<login_token>|<join_link_id>`, `peer` = адрес VPS с портом (например `158.160.x.x:56000`).
-
-> **Как получить токен:** залогиниться в `web.max.ru` через QR → DevTools → WS → opcode 19 → `token`.
-> **Как получить join_link_id:** создать звонок в MAX → скопировать ссылку → часть после `/joincall/`.
 
 ---
 

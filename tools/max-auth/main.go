@@ -230,8 +230,10 @@ func main() {
 		DeviceID: uuid.NewString(),
 	})
 	fatal(err, "send ClientHello")
-	_, err = client.recv()
+	helloResp, err := client.recv()
 	fatal(err, "recv ClientHello")
+	helloJSON, _ := json.MarshalIndent(helloResp, "", "  ")
+	fmt.Printf("    ClientHello response: %s\n", string(helloJSON))
 
 	// --- Step 3: Request SMS ---
 	fmt.Printf("[3/6] Requesting SMS to %s...\n", *phone)
@@ -243,6 +245,8 @@ func main() {
 	fatal(err, "send VerificationRequest")
 	resp, err := client.recv()
 	fatal(err, "recv VerificationRequest")
+	respJSON, _ := json.MarshalIndent(resp, "", "  ")
+	fmt.Printf("    VerificationRequest raw response: %s\n", string(respJSON))
 	p, err := client.payload(resp)
 	fatal(err, "VerificationRequest payload")
 	verifyToken, ok := p["token"].(string)

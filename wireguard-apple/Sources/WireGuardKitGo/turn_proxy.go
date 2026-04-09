@@ -664,7 +664,7 @@ func oneTurnConnection(ctx context.Context, turnParams *turnParams, peer *net.UD
 		Username:               user,
 		Password:               pass,
 		RequestedAddressFamily: addrFamily,
-		LoggerFactory:          logging.NewDefaultLoggerFactory(), // TODO: suppress in production to avoid topology leaks
+		LoggerFactory:          logging.NewDefaultLoggerFactory(),
 	}
 
 	client, err1 := turn.NewClient(cfg)
@@ -846,7 +846,20 @@ func poolCreds(f getCredsFunc, poolSize int) getCredsFunc {
 		}
 
 		if len(pool) < poolSize {
-			u, p, a, err := f(link)
+			var u, p, a string
+			var err error
+			for attempt := 0; attempt < 3; attempt++ {
+				u, p, a, err = f(link)
+				if err == nil {
+					break
+				}
+				if strings.Contains(err.Error(), "no such host") || strings.Contains(err.Error(), "lookup") {
+					log.Printf("DNS resolve failed (attempt %d/3): %v, retrying...", attempt+1, err)
+					time.Sleep(time.Duration(attempt+1) * time.Second)
+					continue
+				}
+				break // non-DNS error, don't retry
+			}
 			if err == nil {
 				pool = append(pool, turnCred{u, p, a})
 				cTime = time.Now()

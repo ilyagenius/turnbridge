@@ -907,6 +907,7 @@ func StartProxy(cLink *C.char, cPeerAddr *C.char, cLocalAddr *C.char, cN C.int) 
 	isJazz := isJazzSignalingLink(link)
 	isTelemost := isTelemostLink(link)
 	isMAX := strings.HasPrefix(link, "max:")
+	isVK := !isWB && !isJazz && !isTelemost && !isMAX
 
 	var credFunc getCredsFunc
 	var peer *net.UDPAddr
@@ -956,7 +957,7 @@ func StartProxy(cLink *C.char, cPeerAddr *C.char, cLocalAddr *C.char, cN C.int) 
 
 	// Multi-room support: comma-separated VK links → separate turnParams per room
 	var paramsList []*turnParams
-	if credFunc == getCreds {
+	if isVK {
 		vkLinks := strings.Split(link, ",")
 		streamsPerRoom := (n + len(vkLinks) - 1) / len(vkLinks)
 		for _, l := range vkLinks {

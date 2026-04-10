@@ -218,11 +218,12 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             let json = String(message.dropFirst("links:".count))
             SharedLogger.info("[LinkRefresh] Writing links to C buffer (\(json.count) chars)", source: .tunnel)
             // Write directly to shared C buffer (CGo exported functions unreliable from NE callbacks)
-            withUnsafeMutablePointer(to: &pendingLinksBuffer) { bufPtr in
-                let rawPtr = UnsafeMutableRawPointer(bufPtr).assumingMemoryBound(to: CChar.self)
-                json.withCString { src in
-                    strncpy(rawPtr, src, Int(PENDING_LINKS_MAXLEN) - 1)
-                    rawPtr[Int(PENDING_LINKS_MAXLEN) - 1] = 0
+            json.withCString { src in
+                withUnsafeMutablePointer(to: &pendingLinksBuffer) { bufPtr in
+                    let dst = UnsafeMutableRawPointer(bufPtr).assumingMemoryBound(to: CChar.self)
+                    let maxLen = 8191
+                    strncpy(dst, src, maxLen)
+                    dst[maxLen] = 0
                 }
             }
             pendingLinksReady = 1

@@ -72,8 +72,9 @@ var proxyCaptchaNeeded = make(chan struct{}, 1)
 var savedWebViewToken string
 var savedWebViewTokenMu sync.Mutex
 
-// linksFromApp receives fresh links JSON from the main app via IPC (Swift → Go).
-var linksFromApp = make(chan string, 1)
+// linksFromApp stores fresh links JSON from the main app via IPC (Swift → Go).
+var linksFromApp string
+var linksFromAppMu sync.Mutex
 
 //export ProxySetLogger
 func ProxySetLogger(context unsafe.Pointer, loggerFn C.proxy_logger_fn_t) {
@@ -154,13 +155,10 @@ func ProxyFetchLinks(cURL *C.char) *C.char {
 
 //export ProxySetLinks
 func ProxySetLinks(cJSON *C.char) {
-	j := C.GoString(cJSON)
-	select {
-	case linksFromApp <- j:
-		log.Printf("[LinkRefresh] Received links from app IPC")
-	default:
-		log.Printf("[LinkRefresh] Links channel full, dropping")
-	}
+	linksFromAppMu.Lock()
+	linksFromApp = C.GoString(cJSON)
+	linksFromAppMu.Unlock()
+	log.Printf("[LinkRefresh] Stored links from app IPC")
 }
 
 type ProxyLogger int
@@ -967,10 +965,9 @@ func StartProxy(cLink *C.char, cFallbackLink *C.char, cPeerAddr *C.char, cLocalA
 	case <-proxyCaptchaNeeded:
 	default:
 	}
-	select {
-	case <-linksFromApp:
-	default:
-	}
+	linksFromAppMu.Lock()
+	linksFromApp = ""
+	linksFromAppMu.Unlock()
 
 	link := C.GoString(cLink)
 	fallbackLink := C.GoString(cFallbackLink)
@@ -1130,32 +1127,50 @@ func StartProxy(cLink *C.char, cFallbackLink *C.char, cPeerAddr *C.char, cLocalA
 
 		// Phase 2: Wait for fresh links from main app (routed through WG tunnel via IPC)
 		if linkServer != "" {
-			// Drain any stale links from previous cycle
-			select {
-			case <-linksFromApp:
-			default:
-			}
+			// Clear any stale links from previous cycle
+			linksFromAppMu.Lock()
+			linksFromApp = ""
+			linksFromAppMu.Unlock()
+
 			log.Printf("[Bootstrap] Waiting for links from app...")
-			select {
-			case linksJSON := <-linksFromApp:
-				var links map[string]string
-				if err := json.Unmarshal([]byte(linksJSON), &links); err == nil {
-					if fresh := links[providerType]; fresh != "" {
-						link = fresh
-						log.Printf("[Bootstrap] Got fresh %s link from app", providerType)
-					} else {
-						log.Printf("[Bootstrap] No %s link in response, using existing", providerType)
+			deadline := time.After(20 * time.Second)
+			ticker := time.NewTicker(500 * time.Millisecond)
+			gotLinks := false
+		pollLoop:
+			for {
+				select {
+				case <-ticker.C:
+					linksFromAppMu.Lock()
+					j := linksFromApp
+					linksFromApp = ""
+					linksFromAppMu.Unlock()
+					if j != "" {
+						var links map[string]string
+						if err := json.Unmarshal([]byte(j), &links); err == nil {
+							if fresh := links[providerType]; fresh != "" {
+								link = fresh
+								log.Printf("[Bootstrap] Got fresh %s link from app", providerType)
+								gotLinks = true
+							} else {
+								log.Printf("[Bootstrap] No %s link in response, using existing", providerType)
+							}
+						} else {
+							log.Printf("[Bootstrap] Failed to parse links JSON: %v", err)
+						}
+						break pollLoop
 					}
-				} else {
-					log.Printf("[Bootstrap] Failed to parse links JSON: %v", err)
+				case <-deadline:
+					log.Printf("[Bootstrap] Timeout waiting for links from app, using existing")
+					break pollLoop
+				case <-ctx.Done():
+					ticker.Stop()
+					vkCancel()
+					vkWg.Wait()
+					return
 				}
-			case <-time.After(20 * time.Second):
-				log.Printf("[Bootstrap] Timeout waiting for links from app, using existing")
-			case <-ctx.Done():
-				vkCancel()
-				vkWg.Wait()
-				return
 			}
+			ticker.Stop()
+			_ = gotLinks
 		}
 
 		// Phase 3: Stop VK bootstrap

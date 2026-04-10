@@ -54,6 +54,9 @@ extern char *ProxyFetchLinks(const char *url);
 // Push fresh links JSON from main app to Go hot-swap loop via IPC.
 extern void ProxySetLinks(const char *linksJSON);
 
+// Set App Group container path (called before StartProxy).
+extern void ProxySetContainerPath(const char *path);
+
 // Shared C buffer for link delivery (Swift writes, Go reads).
 extern char *pendingLinksPtr;
 extern int pendingLinksReady;

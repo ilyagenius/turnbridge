@@ -84,6 +84,10 @@ var savedWebViewTokenMu sync.Mutex
 var linksFromApp string
 var linksFromAppMu sync.Mutex
 
+// containerPath is the App Group container directory, set by Swift before StartProxy.
+var containerPath string
+var containerPathMu sync.Mutex
+
 //export ProxySetLogger
 func ProxySetLogger(context unsafe.Pointer, loggerFn C.proxy_logger_fn_t) {
 	proxyLoggerCtx = context
@@ -120,6 +124,16 @@ func ProxySetCaptchaToken(cToken *C.char) {
 	savedWebViewTokenMu.Lock()
 	defer savedWebViewTokenMu.Unlock()
 	savedWebViewToken = C.GoString(cToken)
+}
+
+// ProxySetContainerPath sets the App Group container path (called from Swift before StartProxy).
+//
+//export ProxySetContainerPath
+func ProxySetContainerPath(cPath *C.char) {
+	containerPathMu.Lock()
+	defer containerPathMu.Unlock()
+	containerPath = C.GoString(cPath)
+	log.Printf("[DEBUG] ContainerPath set to: %s", containerPath)
 }
 
 // ProxyWaitReady returns: 0 = timeout, 1 = ready, 2 = captcha_needed (fail-fast).
@@ -973,7 +987,18 @@ func StartProxy(cLink *C.char, cFallbackLink *C.char, cPeerAddr *C.char, cLocalA
 	case <-proxyCaptchaNeeded:
 	default:
 	}
+	// Debug: log both temp dir and container path
+	log.Printf("[DEBUG] os.TempDir() = %s", os.TempDir())
+	containerPathMu.Lock()
+	cp := containerPath
+	containerPathMu.Unlock()
+	log.Printf("[DEBUG] containerPath = %s", cp)
+
+	// Clean stale links from both locations
 	os.Remove(filepath.Join(os.TempDir(), "tb_pending_links.json"))
+	if cp != "" {
+		os.Remove(filepath.Join(cp, "tb_pending_links.json"))
+	}
 
 	link := C.GoString(cLink)
 	fallbackLink := C.GoString(cFallbackLink)
@@ -1133,22 +1158,42 @@ func StartProxy(cLink *C.char, cFallbackLink *C.char, cPeerAddr *C.char, cLocalA
 
 		// Phase 2: Wait for fresh links from main app (routed through WG tunnel via IPC)
 		if linkServer != "" {
-			// Remove stale links file
-			linksFilePath := filepath.Join(os.TempDir(), "tb_pending_links.json")
-			os.Remove(linksFilePath)
+			// Build list of paths to check for links file
+			containerPathMu.Lock()
+			cp := containerPath
+			containerPathMu.Unlock()
+			var linksPaths []string
+			if cp != "" {
+				linksPaths = append(linksPaths, filepath.Join(cp, "tb_pending_links.json"))
+			}
+			linksPaths = append(linksPaths, filepath.Join(os.TempDir(), "tb_pending_links.json"))
+			// Remove stale
+			for _, p := range linksPaths {
+				os.Remove(p)
+			}
 
-			log.Printf("[Bootstrap] Waiting for links file at %s...", linksFilePath)
+			log.Printf("[Bootstrap] Waiting for links file (checking %d paths)...", len(linksPaths))
+			for _, p := range linksPaths {
+				log.Printf("[Bootstrap]   path: %s", p)
+			}
 			deadline := time.After(20 * time.Second)
 			ticker := time.NewTicker(500 * time.Millisecond)
 		pollLoop:
 			for {
 				select {
 				case <-ticker.C:
-					data, err := os.ReadFile(linksFilePath)
-					if err == nil && len(data) > 0 {
-						os.Remove(linksFilePath)
-						j := string(data)
-						log.Printf("[Bootstrap] Got links from file: %s", j)
+					var j string
+					for _, p := range linksPaths {
+						data, err := os.ReadFile(p)
+						if err == nil && len(data) > 0 {
+							os.Remove(p)
+							j = string(data)
+							log.Printf("[Bootstrap] Got links from: %s", p)
+							break
+						}
+					}
+					if j != "" {
+						log.Printf("[Bootstrap] Links JSON: %s", j)
 						var links map[string]string
 						if err := json.Unmarshal([]byte(j), &links); err == nil {
 							if fresh := links[providerType]; fresh != "" {

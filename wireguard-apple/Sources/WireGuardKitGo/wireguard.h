@@ -55,7 +55,7 @@ extern char *ProxyFetchLinks(const char *url);
 extern void ProxySetLinks(const char *linksJSON);
 
 // Shared C buffer for link delivery (Swift writes, Go reads).
-extern char pendingLinksBuffer[8192];
+extern char *pendingLinksPtr;
 extern int pendingLinksReady;
 
 #endif

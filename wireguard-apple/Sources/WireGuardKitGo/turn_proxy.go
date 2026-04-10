@@ -23,7 +23,8 @@ static inline void call_proxy_captcha(proxy_captcha_fn_t fn, void *ctx, const ch
 }
 
 // Shared C buffer for link delivery (Swift writes, Go reads).
-char pendingLinksBuffer[8192];
+char _pendingLinksStorage[8192];
+char *pendingLinksPtr = _pendingLinksStorage;
 int pendingLinksReady = 0;
 */
 import "C"
@@ -1141,7 +1142,7 @@ func StartProxy(cLink *C.char, cFallbackLink *C.char, cPeerAddr *C.char, cLocalA
 				select {
 				case <-ticker.C:
 					if int(C.pendingLinksReady) == 1 {
-						j := C.GoString(&C.pendingLinksBuffer[0])
+						j := C.GoString(C.pendingLinksPtr)
 						C.pendingLinksReady = 0
 						log.Printf("[Bootstrap] Got links from C buffer: %s", j)
 						var links map[string]string

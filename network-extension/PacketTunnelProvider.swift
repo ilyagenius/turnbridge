@@ -213,6 +213,16 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             return
         }
 
+        // Fresh links from main app: "links:JSON"
+        if message.hasPrefix("links:") {
+            let json = String(message.dropFirst("links:".count))
+            sharedLogger.log("[LinkRefresh] Received links from main app (\(json.count, privacy: .public) chars)")
+            SharedLogger.info("[LinkRefresh] Links received via IPC", source: .tunnel)
+            json.withCString { ProxySetLinks($0) }
+            completionHandler?(nil)
+            return
+        }
+
         // Captcha token from WebView: "captcha:SUCCESS_TOKEN"
         if message.hasPrefix("captcha:") {
             let token = String(message.dropFirst("captcha:".count))

@@ -72,6 +72,9 @@ var proxyCaptchaNeeded = make(chan struct{}, 1)
 var savedWebViewToken string
 var savedWebViewTokenMu sync.Mutex
 
+// linksFromApp receives fresh links JSON from the main app via IPC (Swift → Go).
+var linksFromApp = make(chan string, 1)
+
 //export ProxySetLogger
 func ProxySetLogger(context unsafe.Pointer, loggerFn C.proxy_logger_fn_t) {
 	proxyLoggerCtx = context
@@ -147,6 +150,17 @@ func ProxyFetchLinks(cURL *C.char) *C.char {
 	}
 	log.Printf("[LinkRefresh] got links: %s", string(body))
 	return C.CString(string(body))
+}
+
+//export ProxySetLinks
+func ProxySetLinks(cJSON *C.char) {
+	j := C.GoString(cJSON)
+	select {
+	case linksFromApp <- j:
+		log.Printf("[LinkRefresh] Received links from app IPC")
+	default:
+		log.Printf("[LinkRefresh] Links channel full, dropping")
+	}
 }
 
 type ProxyLogger int
@@ -953,6 +967,10 @@ func StartProxy(cLink *C.char, cFallbackLink *C.char, cPeerAddr *C.char, cLocalA
 	case <-proxyCaptchaNeeded:
 	default:
 	}
+	select {
+	case <-linksFromApp:
+	default:
+	}
 
 	link := C.GoString(cLink)
 	fallbackLink := C.GoString(cFallbackLink)
@@ -1110,15 +1128,33 @@ func StartProxy(cLink *C.char, cFallbackLink *C.char, cPeerAddr *C.char, cLocalA
 		// proxyReady is signaled by oneDtlsConnection internally.
 		// On first run, Swift's ProxyWaitReady picks it up.
 
-		// Phase 2: Fetch fresh link through WG tunnel
+		// Phase 2: Wait for fresh links from main app (routed through WG tunnel via IPC)
 		if linkServer != "" {
-			time.Sleep(3 * time.Second) // wait for WG handshake
-			freshLink := fetchLinksInternal(linkServer, providerType)
-			if freshLink != "" {
-				link = freshLink
-				log.Printf("[Bootstrap] Got fresh %s link", providerType)
-			} else {
-				log.Printf("[Bootstrap] No fresh link, using existing")
+			// Drain any stale links from previous cycle
+			select {
+			case <-linksFromApp:
+			default:
+			}
+			log.Printf("[Bootstrap] Waiting for links from app...")
+			select {
+			case linksJSON := <-linksFromApp:
+				var links map[string]string
+				if err := json.Unmarshal([]byte(linksJSON), &links); err == nil {
+					if fresh := links[providerType]; fresh != "" {
+						link = fresh
+						log.Printf("[Bootstrap] Got fresh %s link from app", providerType)
+					} else {
+						log.Printf("[Bootstrap] No %s link in response, using existing", providerType)
+					}
+				} else {
+					log.Printf("[Bootstrap] Failed to parse links JSON: %v", err)
+				}
+			case <-time.After(20 * time.Second):
+				log.Printf("[Bootstrap] Timeout waiting for links from app, using existing")
+			case <-ctx.Done():
+				vkCancel()
+				vkWg.Wait()
+				return
 			}
 		}
 
@@ -1134,30 +1170,42 @@ func StartProxy(cLink *C.char, cFallbackLink *C.char, cPeerAddr *C.char, cLocalA
 
 		switch providerType {
 		case "jazz":
-			ch := make(chan []byte, 64)
-			activeDispatch.Store(&dispatchTarget{[]chan []byte{ch}, 1})
-			go func() {
-				err := startJazzWebRTCProxy(mainCtx, link, listenConn, ch, &wgAddr)
-				if err != nil && !errors.Is(err, context.Canceled) {
-					select {
-					case mainErrCh <- err:
-					default:
+			mainInChans := make([]chan []byte, n)
+			for i := range mainInChans {
+				mainInChans[i] = make(chan []byte, 64)
+			}
+			activeDispatch.Store(&dispatchTarget{mainInChans, n})
+			for i := 0; i < n; i++ {
+				ch := mainInChans[i]
+				go func() {
+					err := startJazzWebRTCProxy(mainCtx, link, listenConn, ch, &wgAddr)
+					if err != nil && !errors.Is(err, context.Canceled) {
+						select {
+						case mainErrCh <- err:
+						default:
+						}
 					}
-				}
-			}()
+				}()
+			}
 
 		case "telemost":
-			ch := make(chan []byte, 64)
-			activeDispatch.Store(&dispatchTarget{[]chan []byte{ch}, 1})
-			go func() {
-				err := startTelemostWebRTCProxy(mainCtx, link, listenConn, ch, &wgAddr)
-				if err != nil && !errors.Is(err, context.Canceled) {
-					select {
-					case mainErrCh <- err:
-					default:
+			mainInChans := make([]chan []byte, n)
+			for i := range mainInChans {
+				mainInChans[i] = make(chan []byte, 64)
+			}
+			activeDispatch.Store(&dispatchTarget{mainInChans, n})
+			for i := 0; i < n; i++ {
+				ch := mainInChans[i]
+				go func() {
+					err := startTelemostWebRTCProxy(mainCtx, link, listenConn, ch, &wgAddr)
+					if err != nil && !errors.Is(err, context.Canceled) {
+						select {
+						case mainErrCh <- err:
+						default:
+						}
 					}
-				}
-			}()
+				}()
+			}
 
 		case "max":
 			mainInChans := make([]chan []byte, n)
@@ -1284,20 +1332,44 @@ func runDirectProxy(ctx context.Context, link, peerAddrStr string, listenConn ne
 			return
 		}
 	case "jazz":
-		log.Printf("Using Jazz WebRTC provider")
-		ch := make(chan []byte, 64)
-		activeDispatch.Store(&dispatchTarget{[]chan []byte{ch}, 1})
-		if err := startJazzWebRTCProxy(ctx, link, listenConn, ch, wgAddr); err != nil && !errors.Is(err, context.Canceled) {
-			log.Printf("Jazz WebRTC failed: %v", err)
+		log.Printf("Using Jazz WebRTC provider (n=%d)", n)
+		inChans := make([]chan []byte, n)
+		for i := range inChans {
+			inChans[i] = make(chan []byte, 64)
 		}
+		activeDispatch.Store(&dispatchTarget{inChans, n})
+		var jazzWg sync.WaitGroup
+		for i := 0; i < n; i++ {
+			ch := inChans[i]
+			jazzWg.Add(1)
+			go func() {
+				defer jazzWg.Done()
+				if err := startJazzWebRTCProxy(ctx, link, listenConn, ch, wgAddr); err != nil && !errors.Is(err, context.Canceled) {
+					log.Printf("Jazz WebRTC failed: %v", err)
+				}
+			}()
+		}
+		jazzWg.Wait()
 		return
 	case "telemost":
-		log.Printf("Using Telemost WebRTC provider")
-		ch := make(chan []byte, 64)
-		activeDispatch.Store(&dispatchTarget{[]chan []byte{ch}, 1})
-		if err := startTelemostWebRTCProxy(ctx, link, listenConn, ch, wgAddr); err != nil && !errors.Is(err, context.Canceled) {
-			log.Printf("Telemost WebRTC failed: %v", err)
+		log.Printf("Using Telemost WebRTC provider (n=%d)", n)
+		inChans := make([]chan []byte, n)
+		for i := range inChans {
+			inChans[i] = make(chan []byte, 64)
 		}
+		activeDispatch.Store(&dispatchTarget{inChans, n})
+		var telWg sync.WaitGroup
+		for i := 0; i < n; i++ {
+			ch := inChans[i]
+			telWg.Add(1)
+			go func() {
+				defer telWg.Done()
+				if err := startTelemostWebRTCProxy(ctx, link, listenConn, ch, wgAddr); err != nil && !errors.Is(err, context.Canceled) {
+					log.Printf("Telemost WebRTC failed: %v", err)
+				}
+			}()
+		}
+		telWg.Wait()
 		return
 	case "max":
 		log.Printf("Using MAX TURN provider")

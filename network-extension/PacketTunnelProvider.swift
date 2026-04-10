@@ -134,6 +134,13 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             defaults.synchronize()
         }
 
+        // Pass App Group container path to Go for file-based IPC
+        if let containerURL = SharedLogger.logFileURL?.deletingLastPathComponent() {
+            let cpath = containerURL.path
+            SharedLogger.info("[DEBUG] App Group container: \(cpath)", source: .tunnel)
+            cpath.withCString { ProxySetContainerPath($0) }
+        }
+
         DispatchQueue.global(qos: .userInteractive).async {
             StartProxy(vkLink, fallbackLink, peerAddr, listenAddr, nValue, linkServer)
         }
@@ -216,13 +223,28 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         // Fresh links from main app: "links:JSON"
         if message.hasPrefix("links:") {
             let json = String(message.dropFirst("links:".count))
-            let tmpPath = NSTemporaryDirectory() + "tb_pending_links.json"
-            do {
-                try json.write(toFile: tmpPath, atomically: true, encoding: .utf8)
-                SharedLogger.info("[LinkRefresh] Wrote links to \(tmpPath)", source: .tunnel)
-            } catch {
-                SharedLogger.error("[LinkRefresh] Failed to write links file: \(error)", source: .tunnel)
+
+            // DEBUG: Write marker to confirm this branch executes
+            SharedLogger.info("[LinkRefresh] Handler entered, json=\(json.prefix(80))...", source: .tunnel)
+
+            // Write to App Group container (same dir as vpn_tunnel.log)
+            if let containerURL = SharedLogger.logFileURL?.deletingLastPathComponent() {
+                let linksPath = containerURL.appendingPathComponent("tb_pending_links.json").path
+                do {
+                    try json.write(toFile: linksPath, atomically: true, encoding: .utf8)
+                    SharedLogger.info("[LinkRefresh] Wrote to App Group: \(linksPath)", source: .tunnel)
+                } catch {
+                    SharedLogger.error("[LinkRefresh] App Group write FAILED: \(error)", source: .tunnel)
+                }
+            } else {
+                SharedLogger.error("[LinkRefresh] No App Group container!", source: .tunnel)
             }
+
+            // Also write to temp dir (for comparison)
+            let tmpPath = NSTemporaryDirectory() + "tb_pending_links.json"
+            try? json.write(toFile: tmpPath, atomically: true, encoding: .utf8)
+            SharedLogger.info("[LinkRefresh] Also wrote to temp: \(tmpPath)", source: .tunnel)
+
             completionHandler?(nil)
             return
         }

@@ -1,0 +1,9 @@
+[Unit]
+Description=TurnBridge Link Refresh (Jazz + Telemost)
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/turnbridge/link-refresh/refresh.sh
+User=ilya
+WorkingDirectory=/opt/turnbridge

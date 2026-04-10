@@ -2,6 +2,7 @@ package main
 
 /*
 #include <stdlib.h>
+#include <string.h>
 
 typedef void(*proxy_logger_fn_t)(void *context, int level, const char *msg);
 
@@ -20,6 +21,11 @@ static inline void call_proxy_captcha(proxy_captcha_fn_t fn, void *ctx, const ch
         fn(ctx, redirectUri);
     }
 }
+
+// Shared C buffer for link delivery (Swift writes, Go reads).
+#define PENDING_LINKS_MAXLEN 8192
+char pendingLinksBuffer[PENDING_LINKS_MAXLEN];
+volatile int pendingLinksReady = 0;
 */
 import "C"
 
@@ -965,9 +971,7 @@ func StartProxy(cLink *C.char, cFallbackLink *C.char, cPeerAddr *C.char, cLocalA
 	case <-proxyCaptchaNeeded:
 	default:
 	}
-	linksFromAppMu.Lock()
-	linksFromApp = ""
-	linksFromAppMu.Unlock()
+	C.pendingLinksReady = 0
 
 	link := C.GoString(cLink)
 	fallbackLink := C.GoString(cFallbackLink)
@@ -1127,30 +1131,25 @@ func StartProxy(cLink *C.char, cFallbackLink *C.char, cPeerAddr *C.char, cLocalA
 
 		// Phase 2: Wait for fresh links from main app (routed through WG tunnel via IPC)
 		if linkServer != "" {
-			// Clear any stale links from previous cycle
-			linksFromAppMu.Lock()
-			linksFromApp = ""
-			linksFromAppMu.Unlock()
+			// Clear any stale links
+			C.pendingLinksReady = 0
 
-			log.Printf("[Bootstrap] Waiting for links from app...")
+			log.Printf("[Bootstrap] Waiting for links from app (C buffer)...")
 			deadline := time.After(20 * time.Second)
 			ticker := time.NewTicker(500 * time.Millisecond)
-			gotLinks := false
 		pollLoop:
 			for {
 				select {
 				case <-ticker.C:
-					linksFromAppMu.Lock()
-					j := linksFromApp
-					linksFromApp = ""
-					linksFromAppMu.Unlock()
-					if j != "" {
+					if int(C.pendingLinksReady) == 1 {
+						j := C.GoString(&C.pendingLinksBuffer[0])
+						C.pendingLinksReady = 0
+						log.Printf("[Bootstrap] Got links from C buffer: %s", j)
 						var links map[string]string
 						if err := json.Unmarshal([]byte(j), &links); err == nil {
 							if fresh := links[providerType]; fresh != "" {
 								link = fresh
 								log.Printf("[Bootstrap] Got fresh %s link from app", providerType)
-								gotLinks = true
 							} else {
 								log.Printf("[Bootstrap] No %s link in response, using existing", providerType)
 							}
@@ -1170,7 +1169,6 @@ func StartProxy(cLink *C.char, cFallbackLink *C.char, cPeerAddr *C.char, cLocalA
 				}
 			}
 			ticker.Stop()
-			_ = gotLinks
 		}
 
 		// Phase 3: Stop VK bootstrap

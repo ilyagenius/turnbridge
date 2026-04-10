@@ -23,9 +23,8 @@ static inline void call_proxy_captcha(proxy_captcha_fn_t fn, void *ctx, const ch
 }
 
 // Shared C buffer for link delivery (Swift writes, Go reads).
-#define PENDING_LINKS_MAXLEN 8192
-char pendingLinksBuffer[PENDING_LINKS_MAXLEN];
-volatile int pendingLinksReady = 0;
+char pendingLinksBuffer[8192];
+int pendingLinksReady = 0;
 */
 import "C"
 

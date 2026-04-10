@@ -23,9 +23,9 @@ static inline void call_proxy_captcha(proxy_captcha_fn_t fn, void *ctx, const ch
 }
 
 // Shared C buffer for link delivery (Swift writes, Go reads).
-char _pendingLinksStorage[8192];
-char *pendingLinksPtr = _pendingLinksStorage;
-int pendingLinksReady = 0;
+// Defined in pending_links.c so both CGo and Swift see the same symbols.
+extern char *pendingLinksPtr;
+extern int pendingLinksReady;
 */
 import "C"
 

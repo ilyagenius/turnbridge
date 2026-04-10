@@ -1176,8 +1176,18 @@ func StartProxy(cLink *C.char, cFallbackLink *C.char, cPeerAddr *C.char, cLocalA
 			for _, p := range linksPaths {
 				log.Printf("[Bootstrap]   path: %s", p)
 			}
-			deadline := time.After(20 * time.Second)
+			deadline := time.After(30 * time.Second)
 			ticker := time.NewTicker(500 * time.Millisecond)
+			// Also try direct HTTP fetch from Go as fallback (after WG is up)
+			goFetchCh := make(chan string, 1)
+			go func() {
+				// Wait a bit for WG handshake to complete before fetching
+				time.Sleep(8 * time.Second)
+				log.Printf("[Bootstrap] Go-side fallback fetch from %s...", linkServer)
+				if fresh := fetchLinksInternal(linkServer, providerType); fresh != "" {
+					goFetchCh <- fresh
+				}
+			}()
 		pollLoop:
 			for {
 				select {
@@ -1207,8 +1217,12 @@ func StartProxy(cLink *C.char, cFallbackLink *C.char, cPeerAddr *C.char, cLocalA
 						}
 						break pollLoop
 					}
+				case fresh := <-goFetchCh:
+					link = fresh
+					log.Printf("[Bootstrap] Got fresh %s link from Go-side fetch", providerType)
+					break pollLoop
 				case <-deadline:
-					log.Printf("[Bootstrap] Timeout waiting for links from app, using existing")
+					log.Printf("[Bootstrap] Timeout waiting for links, using existing")
 					break pollLoop
 				case <-ctx.Done():
 					ticker.Stop()

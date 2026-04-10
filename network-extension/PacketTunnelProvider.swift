@@ -216,13 +216,13 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         // Fresh links from main app: "links:JSON"
         if message.hasPrefix("links:") {
             let json = String(message.dropFirst("links:".count))
-            SharedLogger.info("[LinkRefresh] Writing links to C buffer (\(json.count) chars)", source: .tunnel)
-            // Write directly to shared C buffer (CGo exported functions unreliable from NE callbacks)
-            json.withCString { src in
-                strncpy(pendingLinksPtr, src, 8191)
-                pendingLinksPtr[8191] = 0
+            let tmpPath = NSTemporaryDirectory() + "tb_pending_links.json"
+            do {
+                try json.write(toFile: tmpPath, atomically: true, encoding: .utf8)
+                SharedLogger.info("[LinkRefresh] Wrote links to \(tmpPath)", source: .tunnel)
+            } catch {
+                SharedLogger.error("[LinkRefresh] Failed to write links file: \(error)", source: .tunnel)
             }
-            pendingLinksReady = 1
             completionHandler?(nil)
             return
         }

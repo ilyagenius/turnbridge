@@ -42,6 +42,8 @@ import (
 	"net"
 	"net/http"
 	neturl "net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -971,7 +973,7 @@ func StartProxy(cLink *C.char, cFallbackLink *C.char, cPeerAddr *C.char, cLocalA
 	case <-proxyCaptchaNeeded:
 	default:
 	}
-	C.pendingLinksReady = 0
+	os.Remove(filepath.Join(os.TempDir(), "tb_pending_links.json"))
 
 	link := C.GoString(cLink)
 	fallbackLink := C.GoString(cFallbackLink)
@@ -1131,20 +1133,22 @@ func StartProxy(cLink *C.char, cFallbackLink *C.char, cPeerAddr *C.char, cLocalA
 
 		// Phase 2: Wait for fresh links from main app (routed through WG tunnel via IPC)
 		if linkServer != "" {
-			// Clear any stale links
-			C.pendingLinksReady = 0
+			// Remove stale links file
+			linksFilePath := filepath.Join(os.TempDir(), "tb_pending_links.json")
+			os.Remove(linksFilePath)
 
-			log.Printf("[Bootstrap] Waiting for links from app (C buffer)...")
+			log.Printf("[Bootstrap] Waiting for links file at %s...", linksFilePath)
 			deadline := time.After(20 * time.Second)
 			ticker := time.NewTicker(500 * time.Millisecond)
 		pollLoop:
 			for {
 				select {
 				case <-ticker.C:
-					if int(C.pendingLinksReady) == 1 {
-						j := C.GoString(C.pendingLinksPtr)
-						C.pendingLinksReady = 0
-						log.Printf("[Bootstrap] Got links from C buffer: %s", j)
+					data, err := os.ReadFile(linksFilePath)
+					if err == nil && len(data) > 0 {
+						os.Remove(linksFilePath)
+						j := string(data)
+						log.Printf("[Bootstrap] Got links from file: %s", j)
 						var links map[string]string
 						if err := json.Unmarshal([]byte(j), &links); err == nil {
 							if fresh := links[providerType]; fresh != "" {

@@ -216,9 +216,16 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         // Fresh links from main app: "links:JSON"
         if message.hasPrefix("links:") {
             let json = String(message.dropFirst("links:".count))
-            sharedLogger.log("[LinkRefresh] Received links from main app (\(json.count, privacy: .public) chars)")
-            SharedLogger.info("[LinkRefresh] Links received via IPC", source: .tunnel)
-            json.withCString { ProxySetLinks($0) }
+            SharedLogger.info("[LinkRefresh] Writing links to C buffer (\(json.count) chars)", source: .tunnel)
+            // Write directly to shared C buffer (CGo exported functions unreliable from NE callbacks)
+            withUnsafeMutablePointer(to: &pendingLinksBuffer) { bufPtr in
+                let rawPtr = UnsafeMutableRawPointer(bufPtr).assumingMemoryBound(to: CChar.self)
+                json.withCString { src in
+                    strncpy(rawPtr, src, Int(PENDING_LINKS_MAXLEN) - 1)
+                    rawPtr[Int(PENDING_LINKS_MAXLEN) - 1] = 0
+                }
+            }
+            pendingLinksReady = 1
             completionHandler?(nil)
             return
         }

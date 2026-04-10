@@ -54,4 +54,10 @@ extern char *ProxyFetchLinks(const char *url);
 // Push fresh links JSON from main app to Go hot-swap loop via IPC.
 extern void ProxySetLinks(const char *linksJSON);
 
+// Shared C buffer for link delivery (Swift writes, Go reads).
+// Used as fallback when CGo exported functions don't work from NE callbacks.
+#define PENDING_LINKS_MAXLEN 8192
+extern char pendingLinksBuffer[PENDING_LINKS_MAXLEN];
+extern volatile int pendingLinksReady;
+
 #endif

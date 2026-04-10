@@ -5,7 +5,7 @@
 const { chromium } = require('playwright');
 const path = require('path');
 
-const COOKIES_PATH = path.join(__dirname, 'yandex-cookies.json');
+const COOKIES_PATH = '/opt/turnbridge/yandex-cookies.json';
 
 (async () => {
   const browser = await chromium.launch({ headless: true });
@@ -17,19 +17,15 @@ const COOKIES_PATH = path.join(__dirname, 'yandex-cookies.json');
   const page = await context.newPage();
 
   try {
-    // Go to Telemost main page
     await page.goto('https://telemost.yandex.ru/', { waitUntil: 'networkidle', timeout: 30000 });
 
-    // Click "Create meeting" button
     const createBtn = page.locator('a[href*="/j/"], button:has-text("Создать"), a:has-text("Создать видеовстречу")').first();
     await createBtn.waitFor({ timeout: 15000 });
     await createBtn.click();
 
-    // Wait for navigation to the room URL
     await page.waitForURL(/telemost\.yandex\.ru\/j\//, { timeout: 15000 });
 
     const url = page.url();
-    // Output just the clean URL
     const match = url.match(/https:\/\/telemost\.yandex\.ru\/j\/\d+/);
     if (match) {
       console.log(match[0]);

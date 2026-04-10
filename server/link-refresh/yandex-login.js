@@ -3,10 +3,9 @@
 // Opens a visible browser window. Log in manually, then press Enter in terminal.
 
 const { chromium } = require('playwright');
-const path = require('path');
 const readline = require('readline');
 
-const COOKIES_PATH = path.join(__dirname, 'yandex-cookies.json');
+const COOKIES_PATH = '/opt/turnbridge/yandex-cookies.json';
 
 (async () => {
   const browser = await chromium.launch({ headless: false });

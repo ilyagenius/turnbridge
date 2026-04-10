@@ -9,7 +9,7 @@ import (
 
 func main() {
 	listen := flag.String("listen", "10.77.77.1:8080", "Listen address (WG interface)")
-	linksFile := flag.String("links", "/home/ilya/link-refresh/links.json", "Path to links.json")
+	linksFile := flag.String("links", "/opt/turnbridge/links.json", "Path to links.json")
 	flag.Parse()
 
 	http.HandleFunc("/links", func(w http.ResponseWriter, r *http.Request) {

@@ -1,23 +1,22 @@
 #!/bin/bash
 # refresh.sh — Refreshes Jazz and Telemost room links
-# Cron:
-#   0 */12 * * * cd /home/ilya/link-refresh && node yandex-refresh-session.js >> refresh.log 2>&1
-#   0 */3  * * * /home/ilya/link-refresh/refresh.sh
+# Runs as systemd timer (link-refresh.timer) every 3 hours
 
 set -euo pipefail
 
-DIR="$(cd "$(dirname "$0")" && pwd)"
+DIR=/opt/turnbridge
 LINKS_FILE="$DIR/links.json"
-LOG_FILE="$DIR/refresh.log"
+SCRIPTS_DIR="$DIR/link-refresh"
+LOG_TAG="link-refresh"
 
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG_FILE"; }
+log() { logger -t "$LOG_TAG" "$*"; echo "[$(date '+%H:%M:%S')] $*"; }
 
 log "=== Starting link refresh ==="
 
 # --- Step 1: Create new Telemost room ---
 log "Creating Telemost room..."
 TELEMOST_LINK=""
-if TELEMOST_LINK=$(node "$DIR/telemost-create.js" 2>>"$LOG_FILE"); then
+if TELEMOST_LINK=$(node "$SCRIPTS_DIR/telemost-create.js" 2>&1); then
     log "Telemost link: $TELEMOST_LINK"
 else
     log "ERROR: Failed to create Telemost room"
@@ -40,7 +39,6 @@ sleep 5
 JAZZ_LINK=$(sudo journalctl -u jazz-turn-proxy --since "5 seconds ago" --no-pager 2>/dev/null | grep -oP 'https://salutejazz\.ru/calls/\S+' | tail -1 || true)
 
 if [ -z "$JAZZ_LINK" ]; then
-    # Retry with wider window
     sleep 3
     JAZZ_LINK=$(sudo journalctl -u jazz-turn-proxy --since "15 seconds ago" --no-pager 2>/dev/null | grep -oP 'https://salutejazz\.ru/calls/\S+' | tail -1 || true)
 fi
@@ -51,11 +49,11 @@ else
     log "WARNING: Could not parse Jazz link from logs"
 fi
 
-# Also parse Jazz link from jazz-turn-proxy service
+# Also try parsing from "Jazz room link:" format
 JAZZ_LINK_2=$(sudo journalctl -u jazz-turn-proxy -n 30 --no-pager 2>/dev/null | grep -oP 'Jazz room link: \K\S+' | tail -1 || true)
 if [ -n "$JAZZ_LINK_2" ]; then
     JAZZ_LINK="$JAZZ_LINK_2"
-    log "Jazz link (from 'room link' log): $JAZZ_LINK"
+    log "Jazz link (from room log): $JAZZ_LINK"
 fi
 
 # --- Step 5: Write links.json ---

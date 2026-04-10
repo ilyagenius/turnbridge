@@ -3,9 +3,10 @@ Description=TurnBridge Link Server
 After=network.target wg-quick@wg0.service
 
 [Service]
-ExecStart=/home/ilya/link-refresh/link-server -listen 10.77.77.1:8080 -links /home/ilya/link-refresh/links.json
+ExecStart=/opt/turnbridge/link-server -listen 10.77.77.1:8080 -links /opt/turnbridge/links.json
 Restart=always
 RestartSec=3
+User=ilya
 
 [Install]
 WantedBy=multi-user.target

@@ -1,0 +1,9 @@
+[Unit]
+Description=Refresh Yandex session cookies
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/node /opt/turnbridge/link-refresh/yandex-refresh-session.js
+User=ilya
+WorkingDirectory=/opt/turnbridge

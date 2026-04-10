@@ -775,16 +775,21 @@ struct ContentView: View {
         }
     }
 
-    private func fetchAndSendLinks() {
+    private func fetchAndSendLinks(attempt: Int = 1) {
         guard let profile = store.selectedProfile,
               !profile.linkServer.isEmpty, !profile.fallbackLink.isEmpty else { return }
         let linkServer = profile.linkServer
         guard let url = URL(string: "http://\(linkServer)/links") else { return }
-        SharedLogger.info("[LinkRefresh] Fetching links from \(linkServer)...")
-        URLSession.shared.dataTask(with: url) { data, _, error in
+        SharedLogger.info("[LinkRefresh] Fetching links from \(linkServer) (attempt \(attempt))...")
+        URLSession.shared.dataTask(with: url) { [weak self] data, _, error in
             guard let data = data, error == nil,
                   let json = String(data: data, encoding: .utf8), !json.isEmpty else {
                 SharedLogger.error("[LinkRefresh] Fetch failed: \(error?.localizedDescription ?? "no data")")
+                if attempt < 3 {
+                    DispatchQueue.global().asyncAfter(deadline: .now() + Double(attempt * 2)) {
+                        self?.fetchAndSendLinks(attempt: attempt + 1)
+                    }
+                }
                 return
             }
             SharedLogger.info("[LinkRefresh] Got links, writing directly to App Group...")

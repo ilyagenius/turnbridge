@@ -51,4 +51,7 @@ extern void ProxySetCaptchaToken(const char *successToken);
 // Returns JSON string (caller must free) or NULL on error.
 extern char *ProxyFetchLinks(const char *url);
 
+// Push fresh links JSON from main app to Go hot-swap loop via IPC.
+extern void ProxySetLinks(const char *linksJSON);
+
 #endif

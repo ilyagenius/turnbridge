@@ -669,6 +669,7 @@ struct ContentView: View {
             self.vpnStatus = newStatus
             if newStatus == .connected && prev != .connected {
                 connTimer.start(); startStatsTimer()
+                fetchAndSendLinks()
             } else if newStatus == .connecting && prev != .connecting {
                 startStatsTimer()
             } else if newStatus == .disconnected {
@@ -772,6 +773,28 @@ struct ContentView: View {
                 if !isSuccess { vpnStatus = .disconnected; SharedLogger.error("Tunnel start failed") }
             }
         }
+    }
+
+    private func fetchAndSendLinks() {
+        guard let profile = store.selectedProfile,
+              !profile.linkServer.isEmpty, !profile.fallbackLink.isEmpty else { return }
+        let linkServer = profile.linkServer
+        guard let url = URL(string: "http://\(linkServer)/links") else { return }
+        SharedLogger.info("[LinkRefresh] Fetching links from \(linkServer)...")
+        URLSession.shared.dataTask(with: url) { data, _, error in
+            guard let data = data, error == nil,
+                  let json = String(data: data, encoding: .utf8), !json.isEmpty else {
+                SharedLogger.error("[LinkRefresh] Fetch failed: \(error?.localizedDescription ?? "no data")")
+                return
+            }
+            SharedLogger.info("[LinkRefresh] Got links, sending to NE...")
+            NETunnelProviderManager.loadAllFromPreferences { managers, _ in
+                guard let manager = managers?.first,
+                      let session = manager.connection as? NETunnelProviderSession,
+                      let msgData = "links:\(json)".data(using: .utf8) else { return }
+                try? session.sendProviderMessage(msgData) { _ in }
+            }
+        }.resume()
     }
 
     private func checkInitialStatus() {

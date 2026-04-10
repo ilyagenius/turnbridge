@@ -789,10 +789,22 @@ struct ContentView: View {
             }
             SharedLogger.info("[LinkRefresh] Got links, sending to NE...")
             NETunnelProviderManager.loadAllFromPreferences { managers, _ in
-                guard let manager = managers?.first,
-                      let session = manager.connection as? NETunnelProviderSession,
-                      let msgData = "links:\(json)".data(using: .utf8) else { return }
-                try? session.sendProviderMessage(msgData) { _ in }
+                guard let manager = managers?.first else {
+                    SharedLogger.error("[LinkRefresh] No tunnel manager found")
+                    return
+                }
+                guard let session = manager.connection as? NETunnelProviderSession else {
+                    SharedLogger.error("[LinkRefresh] Connection is not NETunnelProviderSession (status: \(manager.connection.status.rawValue))")
+                    return
+                }
+                guard let msgData = "links:\(json)".data(using: .utf8) else { return }
+                do {
+                    try session.sendProviderMessage(msgData) { _ in
+                        SharedLogger.info("[LinkRefresh] Message delivered to NE")
+                    }
+                } catch {
+                    SharedLogger.error("[LinkRefresh] sendProviderMessage failed: \(error.localizedDescription)")
+                }
             }
         }.resume()
     }

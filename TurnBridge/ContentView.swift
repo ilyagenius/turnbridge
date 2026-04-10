@@ -787,24 +787,19 @@ struct ContentView: View {
                 SharedLogger.error("[LinkRefresh] Fetch failed: \(error?.localizedDescription ?? "no data")")
                 return
             }
-            SharedLogger.info("[LinkRefresh] Got links, sending to NE...")
-            NETunnelProviderManager.loadAllFromPreferences { managers, _ in
-                guard let manager = managers?.first else {
-                    SharedLogger.error("[LinkRefresh] No tunnel manager found")
-                    return
-                }
-                guard let session = manager.connection as? NETunnelProviderSession else {
-                    SharedLogger.error("[LinkRefresh] Connection is not NETunnelProviderSession (status: \(manager.connection.status.rawValue))")
-                    return
-                }
-                guard let msgData = "links:\(json)".data(using: .utf8) else { return }
+            SharedLogger.info("[LinkRefresh] Got links, writing directly to App Group...")
+            // Write directly to App Group container — bypasses NE IPC entirely.
+            // Go polls this path via containerPath set by ProxySetContainerPath.
+            if let containerURL = SharedLogger.logFileURL?.deletingLastPathComponent() {
+                let linksPath = containerURL.appendingPathComponent("tb_pending_links.json").path
                 do {
-                    try session.sendProviderMessage(msgData) { _ in
-                        SharedLogger.info("[LinkRefresh] Message delivered to NE")
-                    }
+                    try json.write(toFile: linksPath, atomically: true, encoding: .utf8)
+                    SharedLogger.info("[LinkRefresh] Written to App Group: \(linksPath)")
                 } catch {
-                    SharedLogger.error("[LinkRefresh] sendProviderMessage failed: \(error.localizedDescription)")
+                    SharedLogger.error("[LinkRefresh] App Group write FAILED: \(error)")
                 }
+            } else {
+                SharedLogger.error("[LinkRefresh] No App Group container available!")
             }
         }.resume()
     }

@@ -216,9 +216,12 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
     override func handleAppMessage(_ messageData: Data, completionHandler: ((Data?) -> Void)?) {
         guard let message = String(data: messageData, encoding: .utf8) else {
+            SharedLogger.error("[IPC] handleAppMessage: failed to decode \(messageData.count) bytes as UTF-8", source: .tunnel)
             completionHandler?(nil)
             return
         }
+
+        SharedLogger.info("[IPC] handleAppMessage: \(messageData.count) bytes, msg=\(message.prefix(60))", source: .tunnel)
 
         // Fresh links from main app: "links:JSON"
         if message.hasPrefix("links:") {

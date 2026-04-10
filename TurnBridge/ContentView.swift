@@ -781,13 +781,31 @@ struct ContentView: View {
         let linkServer = profile.linkServer
         guard let url = URL(string: "http://\(linkServer)/links") else { return }
         SharedLogger.info("[LinkRefresh] Fetching links from \(linkServer) (attempt \(attempt))...")
-        URLSession.shared.dataTask(with: url) { [weak self] data, _, error in
+        let store = self.store
+        URLSession.shared.dataTask(with: url) { data, _, error in
             guard let data = data, error == nil,
                   let json = String(data: data, encoding: .utf8), !json.isEmpty else {
                 SharedLogger.error("[LinkRefresh] Fetch failed: \(error?.localizedDescription ?? "no data")")
                 if attempt < 3 {
+                    let nextAttempt = attempt + 1
+                    let linkSrv = linkServer
                     DispatchQueue.global().asyncAfter(deadline: .now() + Double(attempt * 2)) {
-                        self?.fetchAndSendLinks(attempt: attempt + 1)
+                        guard let profile = store.selectedProfile,
+                              !profile.linkServer.isEmpty, !profile.fallbackLink.isEmpty,
+                              let retryURL = URL(string: "http://\(linkSrv)/links") else { return }
+                        SharedLogger.info("[LinkRefresh] Retry attempt \(nextAttempt)...")
+                        URLSession.shared.dataTask(with: retryURL) { data, _, error in
+                            guard let data = data, error == nil,
+                                  let json = String(data: data, encoding: .utf8), !json.isEmpty else {
+                                SharedLogger.error("[LinkRefresh] Retry \(nextAttempt) failed: \(error?.localizedDescription ?? "no data")")
+                                return
+                            }
+                            if let containerURL = SharedLogger.logFileURL?.deletingLastPathComponent() {
+                                let linksPath = containerURL.appendingPathComponent("tb_pending_links.json").path
+                                try? json.write(toFile: linksPath, atomically: true, encoding: .utf8)
+                                SharedLogger.info("[LinkRefresh] Retry \(nextAttempt) written to App Group")
+                            }
+                        }.resume()
                     }
                 }
                 return

@@ -936,10 +936,10 @@ func detectProviderType(link string) string {
 	if strings.HasPrefix(link, "max:") {
 		return "max"
 	}
-	if isJazzSignalingLink(link) {
+	if isJazzSignalingLink(link) || strings.Contains(link, "salutejazz.ru") {
 		return "jazz"
 	}
-	if isTelemostLink(link) {
+	if isTelemostLink(link) || strings.Contains(link, "telemost.yandex.ru") {
 		return "telemost"
 	}
 	if strings.Contains(link, "wb") || strings.Contains(link, "wildberries") || strings.Contains(link, "stream.wb") {

@@ -10,8 +10,9 @@ struct VPNProfile: Codable, Identifiable, Equatable {
     var wgQuickConfig: String
     var fallbackLink: String
     var linkServer: String
+    var providerType: String
 
-    init(id: UUID = UUID(), name: String = "", vkLink: String = "", peerAddr: String = "", listenAddr: String = "127.0.0.1:9000", nValue: Int = 1, wgQuickConfig: String = "", fallbackLink: String = "", linkServer: String = "10.77.77.1:8080") {
+    init(id: UUID = UUID(), name: String = "", vkLink: String = "", peerAddr: String = "", listenAddr: String = "127.0.0.1:9000", nValue: Int = 1, wgQuickConfig: String = "", fallbackLink: String = "", linkServer: String = "10.77.77.1:8080", providerType: String = "") {
         self.id = id
         self.name = name
         self.vkLink = vkLink
@@ -21,11 +22,12 @@ struct VPNProfile: Codable, Identifiable, Equatable {
         self.wgQuickConfig = wgQuickConfig
         self.fallbackLink = fallbackLink
         self.linkServer = linkServer
+        self.providerType = providerType
     }
 
     // Backward compatibility: decode profiles saved without new fields.
     enum CodingKeys: String, CodingKey {
-        case id, name, vkLink, peerAddr, listenAddr, nValue, wgQuickConfig, fallbackLink, linkServer
+        case id, name, vkLink, peerAddr, listenAddr, nValue, wgQuickConfig, fallbackLink, linkServer, providerType
     }
 
     init(from decoder: Decoder) throws {
@@ -39,5 +41,6 @@ struct VPNProfile: Codable, Identifiable, Equatable {
         wgQuickConfig = try c.decode(String.self, forKey: .wgQuickConfig)
         fallbackLink = try c.decodeIfPresent(String.self, forKey: .fallbackLink) ?? ""
         linkServer = try c.decodeIfPresent(String.self, forKey: .linkServer) ?? "10.77.77.1:8080"
+        providerType = try c.decodeIfPresent(String.self, forKey: .providerType) ?? ""
     }
 }

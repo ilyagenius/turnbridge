@@ -1,7 +1,7 @@
 //
 //  LinkCache.swift
 //  Shared between main app and network extension via App Group container.
-//  Stores the last-known-good TURN link per provider with a TTL so that
+//  Stores the last-known-good TURN link per (server, provider) with a TTL so
 //  subsequent connects can skip VK bootstrap and go through runDirectProxy.
 //
 
@@ -54,7 +54,10 @@ enum ProviderType: String {
 final class LinkCache {
     static let shared = LinkCache()
 
-    private let filename = "tb_link_cache.json"
+    // v2 filename: keyed by "{serverID}|{provider}" instead of just "{provider}".
+    // Bumping the filename forces any v1 cache from older builds to be ignored
+    // so the next connect takes the cold path and rebuilds the cache correctly.
+    private let filename = "tb_link_cache_v2.json"
     private let lock = NSLock()
 
     private init() {}
@@ -82,16 +85,26 @@ final class LinkCache {
         try? data.write(to: url, options: .atomic)
     }
 
-    func get(_ provider: ProviderType) -> CachedLink? {
-        lock.lock(); defer { lock.unlock() }
-        return readAll()[provider.rawValue]
+    /// Normalize a server identifier so trailing whitespace / case differences
+    /// don't produce distinct cache entries for the same physical server.
+    private func normalizeServerID(_ s: String) -> String {
+        return s.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 
-    func set(_ provider: ProviderType, link: String, ttl: TimeInterval? = nil) {
-        guard provider.supportsFastConnect else { return }
+    private func key(server: String, provider: ProviderType) -> String {
+        return "\(normalizeServerID(server))|\(provider.rawValue)"
+    }
+
+    func get(server: String, provider: ProviderType) -> CachedLink? {
+        lock.lock(); defer { lock.unlock() }
+        return readAll()[key(server: server, provider: provider)]
+    }
+
+    func set(server: String, provider: ProviderType, link: String, ttl: TimeInterval? = nil) {
+        guard provider.supportsFastConnect, !server.isEmpty else { return }
         lock.lock(); defer { lock.unlock() }
         var dict = readAll()
-        dict[provider.rawValue] = CachedLink(
+        dict[key(server: server, provider: provider)] = CachedLink(
             link: link,
             fetchedAt: Date(),
             ttlSeconds: ttl ?? provider.cacheTTL
@@ -99,11 +112,21 @@ final class LinkCache {
         writeAll(dict)
     }
 
-    func invalidate(_ provider: ProviderType) {
+    func invalidate(server: String, provider: ProviderType) {
         lock.lock(); defer { lock.unlock() }
         var dict = readAll()
-        dict.removeValue(forKey: provider.rawValue)
+        dict.removeValue(forKey: key(server: server, provider: provider))
         writeAll(dict)
+    }
+
+    /// Wipe every cached entry (for manual "force cold connect" debugging and
+    /// for reacting to config-level changes that invalidate all links at once).
+    func clearAll() {
+        lock.lock(); defer { lock.unlock() }
+        writeAll([:])
+        if let url = cacheURL {
+            try? FileManager.default.removeItem(at: url)
+        }
     }
 }
 

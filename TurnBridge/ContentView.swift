@@ -780,6 +780,7 @@ struct ContentView: View {
         guard let profile = store.selectedProfile,
               !profile.linkServer.isEmpty, !profile.fallbackLink.isEmpty else { return }
         let linkServer = profile.linkServer
+        let serverID = profile.peerAddr
         guard let url = URL(string: "http://\(linkServer)/links") else { return }
         SharedLogger.info("[LinkRefresh] Fetching links from \(linkServer) (attempt \(attempt))...")
         let store = self.store
@@ -794,6 +795,7 @@ struct ContentView: View {
                         guard let profile = store.selectedProfile,
                               !profile.linkServer.isEmpty, !profile.fallbackLink.isEmpty,
                               let retryURL = URL(string: "http://\(linkSrv)/links") else { return }
+                        let retryServerID = profile.peerAddr
                         SharedLogger.info("[LinkRefresh] Retry attempt \(nextAttempt)...")
                         URLSession.shared.dataTask(with: retryURL) { data, _, error in
                             guard let data = data, error == nil,
@@ -806,7 +808,7 @@ struct ContentView: View {
                                 try? json.write(toFile: linksPath, atomically: true, encoding: .utf8)
                                 SharedLogger.info("[LinkRefresh] Retry \(nextAttempt) written to App Group")
                             }
-                            Self.updateLinkCacheFromJSON(json)
+                            Self.updateLinkCacheFromJSON(json, serverID: retryServerID)
                         }.resume()
                     }
                 }
@@ -830,11 +832,15 @@ struct ContentView: View {
             // direct path and skip VK bootstrap. The extension can't reach
             // 10.77.77.1:8080 on its own (Go code doesn't route through the WG
             // stack), so the main app is the only producer of fresh links.
-            Self.updateLinkCacheFromJSON(json)
+            Self.updateLinkCacheFromJSON(json, serverID: serverID)
         }.resume()
     }
 
-    private static func updateLinkCacheFromJSON(_ json: String) {
+    private static func updateLinkCacheFromJSON(_ json: String, serverID: String) {
+        guard !serverID.isEmpty else {
+            SharedLogger.error("[LinkRefresh] LinkCache: empty serverID, refusing to write")
+            return
+        }
         guard let data = json.data(using: .utf8),
               let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             SharedLogger.error("[LinkRefresh] LinkCache: failed to parse JSON")
@@ -842,18 +848,18 @@ struct ContentView: View {
         }
         var updated: [String] = []
         if let jazz = dict["jazz"] as? String, !jazz.isEmpty {
-            LinkCache.shared.set(.jazz, link: jazz)
+            LinkCache.shared.set(server: serverID, provider: .jazz, link: jazz)
             updated.append("jazz")
         }
         if let telemost = dict["telemost"] as? String, !telemost.isEmpty {
-            LinkCache.shared.set(.telemost, link: telemost)
+            LinkCache.shared.set(server: serverID, provider: .telemost, link: telemost)
             updated.append("telemost")
         }
         if let maxLink = dict["max"] as? String, !maxLink.isEmpty {
-            LinkCache.shared.set(.max, link: maxLink)
+            LinkCache.shared.set(server: serverID, provider: .max, link: maxLink)
             updated.append("max")
         }
-        SharedLogger.info("[LinkRefresh] LinkCache updated: [\(updated.joined(separator: ","))]")
+        SharedLogger.info("[LinkRefresh] LinkCache updated for \(serverID): [\(updated.joined(separator: ","))]")
     }
 
     private func checkInitialStatus() {

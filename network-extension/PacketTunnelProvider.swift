@@ -62,6 +62,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
     private var cacheRefreshTimer: DispatchSourceTimer?
     private var activeProvider: ProviderType = .vk
+    private var activeServerID: String = ""
     private var usedDirectPath: Bool = false
 
     
@@ -125,6 +126,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             return ProviderType.detect(from: vkLinkRaw)
         }()
         self.activeProvider = providerType
+        self.activeServerID = peerAddr
 
         // Optional manual override: force bootstrap (set by cancelTunnelWithError recovery).
         var forceBootstrap = false
@@ -141,26 +143,34 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         var fallbackLink = fallbackLinkRaw
         var useDirectPath = false
 
+        // Cache is keyed by the server's peer address so that each profile (each
+        // physical server) has its own cached link. Previously the cache was
+        // keyed only by provider type, which meant connecting to Server 2 with
+        // a Jazz profile would pick up Server 1's Jazz link and fail WG
+        // handshake with `invalid mac1` because the bridge/room/keys didn't
+        // match. peerAddr is the stable per-server identifier.
+        let serverID = peerAddr
+
         if !forceBootstrap, providerType == .max {
             // MAX links are static (set once by setup.sh, not server-refreshed).
             // Bootstrap through VK is pointless — always go direct with the cached
             // link if any, otherwise with the link from the profile.
-            let linkToUse = LinkCache.shared.get(.max)?.link ?? vkLinkRaw
+            let linkToUse = LinkCache.shared.get(server: serverID, provider: .max)?.link ?? vkLinkRaw
             SharedLogger.info("[FastConnect] MAX provider — always direct (no bootstrap)", source: .tunnel)
             vkLink = linkToUse
             fallbackLink = ""
             useDirectPath = true
         } else if !forceBootstrap,
                   providerType.supportsFastConnect,
-                  let cached = LinkCache.shared.get(providerType),
+                  let cached = LinkCache.shared.get(server: serverID, provider: providerType),
                   cached.isFresh {
             let age = Int(Date().timeIntervalSince(cached.fetchedAt))
-            SharedLogger.info("[FastConnect] Using cached \(providerType.rawValue) link (age=\(age)s), skipping VK bootstrap", source: .tunnel)
+            SharedLogger.info("[FastConnect] Using cached \(providerType.rawValue) link (age=\(age)s) for server \(serverID), skipping VK bootstrap", source: .tunnel)
             vkLink = cached.link
             fallbackLink = ""  // critical: empty fallback → runDirectProxy in Go
             useDirectPath = true
         } else if providerType.supportsFastConnect {
-            SharedLogger.info("[FastConnect] No fresh cache for \(providerType.rawValue), using VK bootstrap", source: .tunnel)
+            SharedLogger.info("[FastConnect] No fresh cache for \(providerType.rawValue)@\(serverID), using VK bootstrap", source: .tunnel)
         }
         self.usedDirectPath = useDirectPath
 
@@ -206,7 +216,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 sharedLogger.error("Proxy transport timeout!")
                 SharedLogger.error("Proxy transport timeout (\(waitTimeoutMs)ms)", source: .tunnel)
                 if useDirectPath {
-                    LinkCache.shared.invalidate(providerType)
+                    LinkCache.shared.invalidate(server: serverID, provider: providerType)
                     // For MAX, bootstrap through VK won't recover — the link is
                     // static and server-side doesn't refresh it. User needs to
                     // refresh login_token / call link manually via setup.sh.
@@ -421,16 +431,21 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             return
         }
 
+        let server = self.activeServerID
+        guard !server.isEmpty else {
+            SharedLogger.error("[LinkRefresh] activeServerID empty, can't write cache", source: .tunnel)
+            return
+        }
         if let jazz = dict["jazz"] as? String, !jazz.isEmpty {
-            LinkCache.shared.set(.jazz, link: jazz)
+            LinkCache.shared.set(server: server, provider: .jazz, link: jazz)
         }
         if let telemost = dict["telemost"] as? String, !telemost.isEmpty {
-            LinkCache.shared.set(.telemost, link: telemost)
+            LinkCache.shared.set(server: server, provider: .telemost, link: telemost)
         }
         if let max = dict["max"] as? String, !max.isEmpty {
-            LinkCache.shared.set(.max, link: max)
+            LinkCache.shared.set(server: server, provider: .max, link: max)
         }
-        SharedLogger.info("[LinkRefresh] Cache updated", source: .tunnel)
+        SharedLogger.info("[LinkRefresh] Cache updated for \(server)", source: .tunnel)
     }
 
     override func sleep(completionHandler: @escaping () -> Void) {

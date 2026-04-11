@@ -47,6 +47,7 @@
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				SharedLogger.swift,
+				LinkCache.swift,
 			);
 			target = A7EBA6432F606A38003CA7F3 /* network-extension */;
 		};

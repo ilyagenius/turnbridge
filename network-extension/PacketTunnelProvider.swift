@@ -60,6 +60,10 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
     }()
 
+    private var cacheRefreshTimer: DispatchSourceTimer?
+    private var activeProvider: ProviderType = .vk
+    private var usedDirectPath: Bool = false
+
     
     override func startTunnel(options: [String : NSObject]?, completionHandler: @escaping (Error?) -> Void) {
         sharedLogger.log("=== Starting tunnel ===")
@@ -90,7 +94,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             return
         }
 
-        guard var vkLink = providerConfiguration["vkLink"] as? String,
+        guard let vkLinkRaw = providerConfiguration["vkLink"] as? String,
               let peerAddr = providerConfiguration["peerAddr"] as? String,
               let listenAddr = providerConfiguration["listenAddr"] as? String,
               let nValueInt = providerConfiguration["nValue"] as? Int else {
@@ -100,22 +104,65 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             return
         }
         let nValue = Int32(nValueInt)
-        let fallbackLink = providerConfiguration["fallbackLink"] as? String ?? ""
+        let fallbackLinkRaw = providerConfiguration["fallbackLink"] as? String ?? ""
         let linkServer = providerConfiguration["linkServer"] as? String ?? ""
 
-        // Check for auto-refreshed links from previous session
-        if let groupID = SharedLogger.appGroupID,
-           let defaults = UserDefaults(suiteName: groupID) {
-            if vkLink.contains("salutejazz.ru"),
-               let updated = defaults.string(forKey: "tb_updated_link_jazz"), !updated.isEmpty {
-                SharedLogger.info("[LinkRefresh] Using updated Jazz link", source: .tunnel)
-                vkLink = updated
-            } else if vkLink.contains("telemost.yandex.ru"),
-                      let updated = defaults.string(forKey: "tb_updated_link_telemost"), !updated.isEmpty {
-                SharedLogger.info("[LinkRefresh] Using updated Telemost link", source: .tunnel)
-                vkLink = updated
+        // --- Fast-connect path ---
+        // If we have a fresh cached link for a supported provider, use it as the primary
+        // link AND clear fallback. That routes StartProxy through runDirectProxy, skipping
+        // the ~30s VK bootstrap entirely. On failure we detect timeout, invalidate cache,
+        // and let the system auto-reconnect into the full bootstrap flow.
+        //
+        // Prefer the explicit providerType from the profile (set by setup.sh). Fall back
+        // to detect-from-link for older profiles that predate the field, or profiles with
+        // an empty turn link (Jazz/MAX profiles where the link is only fetched in-tunnel).
+        let providerTypeFromConfig = (providerConfiguration["providerType"] as? String) ?? ""
+        let providerType: ProviderType = {
+            if !providerTypeFromConfig.isEmpty,
+               let explicit = ProviderType(rawValue: providerTypeFromConfig) {
+                return explicit
             }
+            return ProviderType.detect(from: vkLinkRaw)
+        }()
+        self.activeProvider = providerType
+
+        // Optional manual override: force bootstrap (set by cancelTunnelWithError recovery).
+        var forceBootstrap = false
+        if let groupID = SharedLogger.appGroupID,
+           let defaults = UserDefaults(suiteName: groupID),
+           defaults.bool(forKey: "tb_force_bootstrap") {
+            SharedLogger.info("[FastConnect] force_bootstrap flag set, using VK bootstrap", source: .tunnel)
+            defaults.removeObject(forKey: "tb_force_bootstrap")
+            defaults.synchronize()
+            forceBootstrap = true
         }
+
+        var vkLink = vkLinkRaw
+        var fallbackLink = fallbackLinkRaw
+        var useDirectPath = false
+
+        if !forceBootstrap, providerType == .max {
+            // MAX links are static (set once by setup.sh, not server-refreshed).
+            // Bootstrap through VK is pointless — always go direct with the cached
+            // link if any, otherwise with the link from the profile.
+            let linkToUse = LinkCache.shared.get(.max)?.link ?? vkLinkRaw
+            SharedLogger.info("[FastConnect] MAX provider — always direct (no bootstrap)", source: .tunnel)
+            vkLink = linkToUse
+            fallbackLink = ""
+            useDirectPath = true
+        } else if !forceBootstrap,
+                  providerType.supportsFastConnect,
+                  let cached = LinkCache.shared.get(providerType),
+                  cached.isFresh {
+            let age = Int(Date().timeIntervalSince(cached.fetchedAt))
+            SharedLogger.info("[FastConnect] Using cached \(providerType.rawValue) link (age=\(age)s), skipping VK bootstrap", source: .tunnel)
+            vkLink = cached.link
+            fallbackLink = ""  // critical: empty fallback → runDirectProxy in Go
+            useDirectPath = true
+        } else if providerType.supportsFastConnect {
+            SharedLogger.info("[FastConnect] No fresh cache for \(providerType.rawValue), using VK bootstrap", source: .tunnel)
+        }
+        self.usedDirectPath = useDirectPath
 
         SharedLogger.info("Peer: \(peerAddr), Listen: \(listenAddr), N: \(nValue)", source: .tunnel)
         SharedLogger.info("Starting TURN proxy...", source: .tunnel)
@@ -145,13 +192,36 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             StartProxy(vkLink, fallbackLink, peerAddr, listenAddr, nValue, linkServer)
         }
 
+        // Direct path: TURN allocate should complete in a few seconds. Use a short
+        // timeout so that a dead cached link is detected fast and we can fall back
+        // to bootstrap on the next attempt. Bootstrap path keeps the original 45s
+        // since Phase 2 (in-tunnel fetch) can legitimately take ~30s.
+        let waitTimeoutMs: Int32 = useDirectPath ? 8000 : 45000
+
         DispatchQueue.global(qos: .userInteractive).async { [weak self] in
-            let ready = ProxyWaitReady(45000)
+            let ready = ProxyWaitReady(waitTimeoutMs)
             guard let self = self else { return }
 
             if ready == 0 {
                 sharedLogger.error("Proxy transport timeout!")
-                SharedLogger.error("Proxy transport timeout (45s)", source: .tunnel)
+                SharedLogger.error("Proxy transport timeout (\(waitTimeoutMs)ms)", source: .tunnel)
+                if useDirectPath {
+                    LinkCache.shared.invalidate(providerType)
+                    // For MAX, bootstrap through VK won't recover — the link is
+                    // static and server-side doesn't refresh it. User needs to
+                    // refresh login_token / call link manually via setup.sh.
+                    if providerType != .max {
+                        SharedLogger.info("[FastConnect] Direct path failed, will use bootstrap on retry", source: .tunnel)
+                        if let groupID = SharedLogger.appGroupID,
+                           let defaults = UserDefaults(suiteName: groupID) {
+                            defaults.set(true, forKey: "tb_force_bootstrap")
+                            defaults.synchronize()
+                        }
+                    } else {
+                        SharedLogger.error("[FastConnect] MAX link dead — refresh login_token/call via setup.sh", source: .tunnel)
+                    }
+                }
+                StopProxy()
                 completionHandler(PacketTunnelProviderError.invalidProtocolConfiguration)
                 return
             }
@@ -174,8 +244,10 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                     sharedLogger.log("Tunnel interface is \(interfaceName)")
                     SharedLogger.info("Tunnel up on interface \(interfaceName)", source: .wireguard)
 
-                    // Fetch updated room links through the WG tunnel
+                    // Fetch updated room links through the WG tunnel and start
+                    // periodic refresh so the cache stays warm while the tunnel is up.
                     self.fetchUpdatedLinks()
+                    self.startCacheRefreshTimer()
                 }
                 completionHandler(adapterError)
             }
@@ -186,6 +258,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         sharedLogger.log("Stopping tunnel")
         SharedLogger.info("Stopping tunnel (reason: \(reason.rawValue))", source: .tunnel)
 
+        stopCacheRefreshTimer()
         StopProxy()
         SharedLogger.info("TURN proxy stopped", source: .tunnel)
 
@@ -304,45 +377,71 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
     // MARK: - Link auto-refresh
 
+    /// Initial fetch ~3s after tunnel is up.
     private func fetchUpdatedLinks() {
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 3) { [weak self] in
-            guard self != nil else { return }
-            let url = "http://10.77.77.1:8080/links"
-            guard let cResult = url.withCString({ ProxyFetchLinks($0) }) else {
-                SharedLogger.info("[LinkRefresh] No links from server (NULL)", source: .tunnel)
-                return
-            }
-            let json = String(cString: cResult)
-            free(cResult)
-
-            SharedLogger.info("[LinkRefresh] Received: \(json)", source: .tunnel)
-
-            guard let data = json.data(using: .utf8),
-                  let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                SharedLogger.error("[LinkRefresh] Failed to parse JSON", source: .tunnel)
-                return
-            }
-
-            guard let groupID = SharedLogger.appGroupID,
-                  let defaults = UserDefaults(suiteName: groupID) else { return }
-
-            if let jazz = dict["jazz"] as? String, !jazz.isEmpty {
-                defaults.set(jazz, forKey: "tb_updated_link_jazz")
-            }
-            if let telemost = dict["telemost"] as? String, !telemost.isEmpty {
-                defaults.set(telemost, forKey: "tb_updated_link_telemost")
-            }
-            defaults.synchronize()
-            SharedLogger.info("[LinkRefresh] Links saved to App Group", source: .tunnel)
+            self?.refreshLinkCacheFromServer()
         }
     }
 
+    /// Periodic in-tunnel refresh: pulls fresh links through 10.77.77.1:8080 every
+    /// 10 minutes and writes them to the LinkCache file. This keeps the cache
+    /// warmer than its TTL so subsequent connects take the direct path.
+    private func startCacheRefreshTimer() {
+        stopCacheRefreshTimer()
+        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
+        timer.schedule(deadline: .now() + 600, repeating: 600)
+        timer.setEventHandler { [weak self] in
+            self?.refreshLinkCacheFromServer()
+        }
+        timer.resume()
+        self.cacheRefreshTimer = timer
+        SharedLogger.info("[LinkRefresh] Cache refresh timer started (10 min)", source: .tunnel)
+    }
+
+    private func stopCacheRefreshTimer() {
+        cacheRefreshTimer?.cancel()
+        cacheRefreshTimer = nil
+    }
+
+    private func refreshLinkCacheFromServer() {
+        let url = "http://10.77.77.1:8080/links"
+        guard let cResult = url.withCString({ ProxyFetchLinks($0) }) else {
+            SharedLogger.info("[LinkRefresh] No links from server (NULL)", source: .tunnel)
+            return
+        }
+        let json = String(cString: cResult)
+        free(cResult)
+
+        SharedLogger.info("[LinkRefresh] Received: \(json)", source: .tunnel)
+
+        guard let data = json.data(using: .utf8),
+              let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            SharedLogger.error("[LinkRefresh] Failed to parse JSON", source: .tunnel)
+            return
+        }
+
+        if let jazz = dict["jazz"] as? String, !jazz.isEmpty {
+            LinkCache.shared.set(.jazz, link: jazz)
+        }
+        if let telemost = dict["telemost"] as? String, !telemost.isEmpty {
+            LinkCache.shared.set(.telemost, link: telemost)
+        }
+        if let max = dict["max"] as? String, !max.isEmpty {
+            LinkCache.shared.set(.max, link: max)
+        }
+        SharedLogger.info("[LinkRefresh] Cache updated", source: .tunnel)
+    }
+
     override func sleep(completionHandler: @escaping () -> Void) {
-        // Add code here to get ready to sleep.
         completionHandler()
     }
 
     override func wake() {
-        // Add code here to wake up.
+        // Immediate refresh on wake to catch any server-side rotation that
+        // happened while the device was asleep.
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            self?.refreshLinkCacheFromServer()
+        }
     }
 }

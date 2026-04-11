@@ -13,6 +13,12 @@ struct TurnConfigImport: Codable {
     let name: String?
     let fallback: String?
     let linkServer: String?
+    let providerType: String?
+
+    enum CodingKeys: String, CodingKey {
+        case turn, peer, listen, n, wg, name, fallback, linkServer
+        case providerType = "provider_type"
+    }
 }
 
 enum ConfigParseError: LocalizedError {

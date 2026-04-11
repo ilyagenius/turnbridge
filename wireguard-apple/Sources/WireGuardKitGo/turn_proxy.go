@@ -880,6 +880,16 @@ func poolCreds(f getCredsFunc, poolSize int) getCredsFunc {
 		}
 
 		if len(pool) < poolSize {
+			// Rate limit: enforce ≥1s gap from the previous fetch BEFORE the new
+			// one, not after. That way the first worker returns immediately (no
+			// previous fetch → no wait), and subsequent workers pay the rate-limit
+			// cost without delaying the one that signals proxyReady.
+			if !cTime.IsZero() {
+				elapsed := time.Since(cTime)
+				if elapsed < time.Second {
+					time.Sleep(time.Second - elapsed)
+				}
+			}
 			var u, p, a string
 			var err error
 			for attempt := 0; attempt < 3; attempt++ {
@@ -898,12 +908,6 @@ func poolCreds(f getCredsFunc, poolSize int) getCredsFunc {
 				pool = append(pool, turnCred{u, p, a})
 				cTime = time.Now()
 				log.Printf("Successfully registered User Identity %d/%d", len(pool), poolSize)
-
-				// Space out requests by 1000ms to avoid API limits
-				if len(pool) < poolSize {
-					time.Sleep(1000 * time.Millisecond)
-				}
-
 				c := pool[len(pool)-1]
 				idx++
 				return c.user, c.pass, c.addr, nil
@@ -951,7 +955,7 @@ func detectProviderType(link string) string {
 // fetchLinksInternal fetches fresh room links from the link-server through the WG tunnel.
 func fetchLinksInternal(linkServer, providerType string) string {
 	linkURL := "http://" + linkServer + "/links"
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := &http.Client{Timeout: 2 * time.Second}
 	resp, err := client.Get(linkURL)
 	if err != nil {
 		log.Printf("[LinkRefresh] fetch error: %v", err)
@@ -1176,16 +1180,35 @@ func StartProxy(cLink *C.char, cFallbackLink *C.char, cPeerAddr *C.char, cLocalA
 			for _, p := range linksPaths {
 				log.Printf("[Bootstrap]   path: %s", p)
 			}
-			deadline := time.After(30 * time.Second)
-			ticker := time.NewTicker(500 * time.Millisecond)
-			// Also try direct HTTP fetch from Go as fallback (after WG is up)
+			deadline := time.After(12 * time.Second)
+			ticker := time.NewTicker(300 * time.Millisecond)
+			// Go-side fetch with aggressive retry: start immediately, retry every
+			// 500ms until WG is routable. WG handshake typically completes in
+			// 1-2s after VK transport is up, so the first successful fetch lands
+			// around t=1.5-2.5s instead of the old fixed 8s sleep.
 			goFetchCh := make(chan string, 1)
 			go func() {
-				// Wait a bit for WG handshake to complete before fetching
-				time.Sleep(8 * time.Second)
-				log.Printf("[Bootstrap] Go-side fallback fetch from %s...", linkServer)
-				if fresh := fetchLinksInternal(linkServer, providerType); fresh != "" {
-					goFetchCh <- fresh
+				fetchCtx, fetchCancel := context.WithTimeout(ctx, 10*time.Second)
+				defer fetchCancel()
+				retryTicker := time.NewTicker(500 * time.Millisecond)
+				defer retryTicker.Stop()
+				attempt := 0
+				for {
+					attempt++
+					if fresh := fetchLinksInternal(linkServer, providerType); fresh != "" {
+						log.Printf("[Bootstrap] Go-side fetch succeeded on attempt %d", attempt)
+						select {
+						case goFetchCh <- fresh:
+						default:
+						}
+						return
+					}
+					select {
+					case <-retryTicker.C:
+					case <-fetchCtx.Done():
+						log.Printf("[Bootstrap] Go-side fetch gave up after %d attempts", attempt)
+						return
+					}
 				}
 			}()
 		pollLoop:

@@ -806,6 +806,7 @@ struct ContentView: View {
                                 try? json.write(toFile: linksPath, atomically: true, encoding: .utf8)
                                 SharedLogger.info("[LinkRefresh] Retry \(nextAttempt) written to App Group")
                             }
+                            Self.updateLinkCacheFromJSON(json)
                         }.resume()
                     }
                 }
@@ -825,7 +826,34 @@ struct ContentView: View {
             } else {
                 SharedLogger.error("[LinkRefresh] No App Group container available!")
             }
+            // Feed the LinkCache so the next connect can take the fast-connect
+            // direct path and skip VK bootstrap. The extension can't reach
+            // 10.77.77.1:8080 on its own (Go code doesn't route through the WG
+            // stack), so the main app is the only producer of fresh links.
+            Self.updateLinkCacheFromJSON(json)
         }.resume()
+    }
+
+    private static func updateLinkCacheFromJSON(_ json: String) {
+        guard let data = json.data(using: .utf8),
+              let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            SharedLogger.error("[LinkRefresh] LinkCache: failed to parse JSON")
+            return
+        }
+        var updated: [String] = []
+        if let jazz = dict["jazz"] as? String, !jazz.isEmpty {
+            LinkCache.shared.set(.jazz, link: jazz)
+            updated.append("jazz")
+        }
+        if let telemost = dict["telemost"] as? String, !telemost.isEmpty {
+            LinkCache.shared.set(.telemost, link: telemost)
+            updated.append("telemost")
+        }
+        if let maxLink = dict["max"] as? String, !maxLink.isEmpty {
+            LinkCache.shared.set(.max, link: maxLink)
+            updated.append("max")
+        }
+        SharedLogger.info("[LinkRefresh] LinkCache updated: [\(updated.joined(separator: ","))]")
     }
 
     private func checkInitialStatus() {

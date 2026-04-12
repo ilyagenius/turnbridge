@@ -61,9 +61,14 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     }()
 
     private var cacheRefreshTimer: DispatchSourceTimer?
+    private var handshakeCheckItem: DispatchWorkItem?
     private var activeProvider: ProviderType = .vk
     private var activeServerID: String = ""
     private var usedDirectPath: Bool = false
+    private var isStopping: Bool = false
+    /// Incremented on each startTunnel; async blocks capture and compare to
+    /// detect stale work from a previous tunnel session on the same instance.
+    private var tunnelGeneration: UInt64 = 0
 
     // Original connection params for in-tunnel bootstrap restart
     private var savedVkLink: String = ""
@@ -76,6 +81,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
     
     override func startTunnel(options: [String : NSObject]?, completionHandler: @escaping (Error?) -> Void) {
+        isStopping = false
+        tunnelGeneration &+= 1
         sharedLogger.log("=== Starting tunnel ===")
         SharedLogger.info("Starting tunnel", source: .tunnel)
 
@@ -278,10 +285,10 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                     self.startCacheRefreshTimer()
 
                     // Fast-connect health check: if WG handshake doesn't complete
-                    // within 3s, the cached link likely points to a dead room
+                    // within 8s, the cached link likely points to a dead room
                     // (bridge was restarted into a new room by link-refresh).
-                    // Invalidate cache and cancel so the system auto-reconnects
-                    // through VK bootstrap with a fresh link.
+                    // Invalidate cache and seamlessly restart via VK bootstrap
+                    // using reasserting (no user action needed).
                     if useDirectPath {
                         self.scheduleHandshakeCheck(server: serverID, provider: providerType)
                     }
@@ -295,6 +302,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         sharedLogger.log("Stopping tunnel")
         SharedLogger.info("Stopping tunnel (reason: \(reason.rawValue))", source: .tunnel)
 
+        isStopping = true
+        handshakeCheckItem?.cancel()
+        handshakeCheckItem = nil
         stopCacheRefreshTimer()
         StopProxy()
         SharedLogger.info("TURN proxy stopped", source: .tunnel)
@@ -415,26 +425,21 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     // MARK: - Fast-connect handshake health check
 
     /// After a fast-connect (direct path) start, verify WG handshake completes
-    /// within 3 seconds. If the cached link pointed at a dead room (bridge was
-    /// rotated by link-refresh), no valid WG response will arrive. In that case
-    /// invalidate the cache and tear down the tunnel so the system auto-reconnects
-    /// through VK bootstrap with a fresh link.
+    /// within 8 seconds. When n workers join a WebRTC room, the SFU must
+    /// renegotiate the bridge's subscriber PC — the first WG handshake init may
+    /// be lost. WG retries at 5s; 8s gives margin for retry + round-trip.
+    /// If no handshake: the cached link is dead (bridge rotated by link-refresh).
+    /// Invalidate cache and seamlessly restart via VK bootstrap (reasserting).
     private func scheduleHandshakeCheck(server: String, provider: ProviderType) {
-        // 8s timeout: when n workers join a WebRTC room simultaneously, the SFU
-        // must renegotiate the bridge's subscriber PC to include the new publishers.
-        // The first WG handshake initiation may be lost (bridge not subscribed yet).
-        // WG retries at 5s, by which point the bridge is ready. 8s gives enough
-        // margin for SFU renegotiation + WG retry + bridge response round-trip.
-        DispatchQueue.global(qos: .userInteractive).asyncAfter(deadline: .now() + 8.0) { [weak self] in
-            guard let self = self else { return }
+        let item = DispatchWorkItem { [weak self] in
+            guard let self = self, !self.isStopping else { return }
             self.adapter.getRuntimeConfiguration { [weak self] configStr in
-                guard let self = self else { return }
+                guard let self = self, !self.isStopping else { return }
                 guard let configStr = configStr else {
                     SharedLogger.error("[FastConnect] Health check: no runtime config", source: .tunnel)
                     self.handleDeadDirectPath(server: server, provider: provider)
                     return
                 }
-                // Parse last_handshake_time_sec from UAPI output
                 var hasHandshake = false
                 for line in configStr.split(separator: "\n") {
                     if line.hasPrefix("last_handshake_time_sec="),
@@ -452,9 +457,14 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 }
             }
         }
+        self.handshakeCheckItem = item
+        DispatchQueue.global(qos: .userInteractive).asyncAfter(deadline: .now() + 8.0, execute: item)
     }
 
     private func handleDeadDirectPath(server: String, provider: ProviderType) {
+        guard !isStopping else { return }
+        let gen = self.tunnelGeneration
+
         LinkCache.shared.invalidate(server: server, provider: provider)
         SharedLogger.info("[FastConnect] Cache invalidated for \(provider.rawValue)@\(server), restarting via bootstrap in-tunnel", source: .tunnel)
 
@@ -472,7 +482,10 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         self.stopCacheRefreshTimer()
 
         self.adapter.stop { [weak self] _ in
-            guard let self = self else { return }
+            guard let self = self, !self.isStopping, self.tunnelGeneration == gen else {
+                self?.reasserting = false
+                return
+            }
             StopProxy()
             SharedLogger.info("[FastConnect] Stopped dead proxy, waiting for port release...", source: .tunnel)
 
@@ -484,42 +497,58 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             let linkSrv = self.savedLinkServer
 
             // StopProxy cancels the Go context but goroutines release the UDP
-            // listener asynchronously. Wait briefly for port 9000 to be freed
-            // before starting the new proxy, otherwise bind fails with EADDRINUSE.
-            DispatchQueue.global(qos: .userInteractive).asyncAfter(deadline: .now() + 1.5) {
+            // listener asynchronously. Wait 1.5s for port 9000 to be freed,
+            // then start new proxy and wait for it to signal ready.
+            // IMPORTANT: StartProxy must run BEFORE ProxyWaitReady to avoid
+            // stale signals — StartProxy drains the proxyReady channel first.
+            DispatchQueue.global(qos: .userInteractive).asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                guard let self = self, !self.isStopping, self.tunnelGeneration == gen else {
+                    self?.reasserting = false
+                    return
+                }
                 SharedLogger.info("[FastConnect] Starting VK bootstrap...", source: .tunnel)
-                StartProxy(vkLink, fallback, peer, listen, n, linkSrv)
-            }
 
-            DispatchQueue.global(qos: .userInteractive).async { [weak self] in
-                let ready = ProxyWaitReady(45000)
-                guard let self = self else { return }
-
-                if ready == 0 {
-                    SharedLogger.error("[FastConnect] Bootstrap also failed", source: .tunnel)
-                    self.reasserting = false
-                    self.cancelTunnelWithError(PacketTunnelProviderError.invalidProtocolConfiguration)
-                    return
+                // StartProxy blocks for the proxy lifetime — run on its own thread.
+                DispatchQueue.global(qos: .userInteractive).async {
+                    StartProxy(vkLink, fallback, peer, listen, n, linkSrv)
                 }
 
-                guard let tunnelConfig = self.savedTunnelConfig else {
-                    SharedLogger.error("[FastConnect] No saved tunnel config", source: .tunnel)
-                    self.reasserting = false
-                    self.cancelTunnelWithError(PacketTunnelProviderError.invalidProtocolConfiguration)
-                    return
-                }
+                // ProxyWaitReady on a separate thread. StartProxy's drain of
+                // proxyReady executes before any new signal can be produced,
+                // so ProxyWaitReady will only receive the NEW proxy's signal.
+                DispatchQueue.global(qos: .userInteractive).async { [weak self] in
+                    let ready = ProxyWaitReady(45000)
+                    guard let self = self, !self.isStopping, self.tunnelGeneration == gen else {
+                        self?.reasserting = false
+                        return
+                    }
 
-                SharedLogger.info("[FastConnect] Bootstrap proxy ready, restarting WG...", source: .tunnel)
-                self.adapter.start(tunnelConfiguration: tunnelConfig) { [weak self] error in
-                    guard let self = self else { return }
-                    self.reasserting = false
-                    if let error = error {
-                        SharedLogger.error("[FastConnect] WG restart failed: \(error)", source: .tunnel)
-                        self.cancelTunnelWithError(error)
-                    } else {
-                        SharedLogger.info("[FastConnect] Bootstrap successful, tunnel restored", source: .tunnel)
-                        self.fetchUpdatedLinks()
-                        self.startCacheRefreshTimer()
+                    if ready == 0 {
+                        SharedLogger.error("[FastConnect] Bootstrap also failed", source: .tunnel)
+                        self.reasserting = false
+                        self.cancelTunnelWithError(PacketTunnelProviderError.invalidProtocolConfiguration)
+                        return
+                    }
+
+                    guard let tunnelConfig = self.savedTunnelConfig else {
+                        SharedLogger.error("[FastConnect] No saved tunnel config", source: .tunnel)
+                        self.reasserting = false
+                        self.cancelTunnelWithError(PacketTunnelProviderError.invalidProtocolConfiguration)
+                        return
+                    }
+
+                    SharedLogger.info("[FastConnect] Bootstrap proxy ready, restarting WG...", source: .tunnel)
+                    self.adapter.start(tunnelConfiguration: tunnelConfig) { [weak self] error in
+                        guard let self = self else { return }
+                        self.reasserting = false
+                        if let error = error {
+                            SharedLogger.error("[FastConnect] WG restart failed: \(error)", source: .tunnel)
+                            self.cancelTunnelWithError(error)
+                        } else {
+                            SharedLogger.info("[FastConnect] Bootstrap successful, tunnel restored", source: .tunnel)
+                            self.fetchUpdatedLinks()
+                            self.startCacheRefreshTimer()
+                        }
                     }
                 }
             }

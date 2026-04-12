@@ -41,9 +41,29 @@ Set `turn` to a VK call join link and `peer` to your VPS address with vk-turn-pr
 
 ---
 
+## 🔄 Система транспорта ссылок (Fast-Connect)
+
+Автоматическая ротация и кеширование ссылок на комнаты — пользователю не нужно вручную обновлять ссылки при их протухании.
+
+**Проблема:** Ссылки Jazz, Telemost и MAX — временные, сервер ротирует их каждые ~45 минут. Раньше при протухании ссылки приходилось вручную вставлять новую.
+
+**Решение:** На сервере работает таймер **link-refresh**, который автоматически создаёт свежие комнаты. Внутри тоннеля поднят **link-server** (`10.77.77.1:8080/links`), который отдаёт актуальные ссылки подключённым клиентам. iOS-приложение забирает свежие ссылки через уже поднятый VK bootstrap тоннель и кеширует их локально.
+
+**Как это работает:**
+1. **Первое подключение** — приложение использует VK TURN ссылку (которая не протухает, пока валиден login_token VK) для поднятия тоннеля через VK bootstrap (~40 сек).
+2. После поднятия тоннеля приложение забирает актуальную ссылку Jazz/Telemost/MAX с link-server и **кеширует локально**.
+3. **Последующие подключения** — приложение читает кеш и подключается **напрямую** через целевой провайдер, минуя VK bootstrap (~5-8 сек).
+4. Фоновый таймер обновляет кеш пока тоннель активен.
+5. Если закешированная ссылка мертва (комната была пересоздана) — приложение автоматически откатывается на VK bootstrap, забирает новую ссылку и кеширует её. Действий от пользователя не требуется.
+
+> Ссылки VK не протухают (привязаны к login_token, а не к времени жизни комнаты), поэтому VK используется как bootstrap-транспорт. Ссылки Jazz/Telemost/MAX ротируются на сервере каждые ~45 минут.
+
+---
+
 ## ✨ Features
 
-* **Multiple Tunnel Backends:** Jazz (SberJazz), WB (Wildberries), and VK TURN — all disguising traffic as legitimate Russian platform traffic.
+* **Multiple Tunnel Backends:** Jazz (SberJazz), Telemost (Yandex), WB (Wildberries), and VK TURN — all disguising traffic as legitimate Russian platform traffic.
+* **Fast-Connect:** Автоматическое кеширование ссылок — повторные подключения за ~5-8 сек вместо ~40 сек. Ссылки ротируются и обновляются автоматически через VK bootstrap тоннель.
 * **WireGuard & Amnezia WG Integration:**
   - Complete WireGuard protocol support with key management, routing, and DNS configuration
   - Full Amnezia WireGuard obfuscation support including jitter parameters (Jc, Jmin, Jmax), packet size obfuscation (S1-S4), and magic headers (H1-H4)

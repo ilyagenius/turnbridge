@@ -65,6 +65,15 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private var activeServerID: String = ""
     private var usedDirectPath: Bool = false
 
+    // Original connection params for in-tunnel bootstrap restart
+    private var savedVkLink: String = ""
+    private var savedFallbackLink: String = ""
+    private var savedPeerAddr: String = ""
+    private var savedListenAddr: String = ""
+    private var savedNValue: Int32 = 1
+    private var savedLinkServer: String = ""
+    private var savedTunnelConfig: TunnelConfiguration?
+
     
     override func startTunnel(options: [String : NSObject]?, completionHandler: @escaping (Error?) -> Void) {
         sharedLogger.log("=== Starting tunnel ===")
@@ -107,6 +116,15 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         let nValue = Int32(nValueInt)
         let fallbackLinkRaw = providerConfiguration["fallbackLink"] as? String ?? ""
         let linkServer = providerConfiguration["linkServer"] as? String ?? ""
+
+        // Save original params for possible in-tunnel bootstrap restart
+        self.savedVkLink = vkLinkRaw
+        self.savedFallbackLink = fallbackLinkRaw
+        self.savedPeerAddr = peerAddr
+        self.savedListenAddr = listenAddr
+        self.savedNValue = nValue
+        self.savedLinkServer = linkServer
+        self.savedTunnelConfig = tunnelConfiguration
 
         // --- Fast-connect path ---
         // If we have a fresh cached link for a supported provider, use it as the primary
@@ -433,18 +451,70 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
     private func handleDeadDirectPath(server: String, provider: ProviderType) {
         LinkCache.shared.invalidate(server: server, provider: provider)
-        SharedLogger.info("[FastConnect] Cache invalidated for \(provider.rawValue)@\(server), restarting via bootstrap", source: .tunnel)
+        SharedLogger.info("[FastConnect] Cache invalidated for \(provider.rawValue)@\(server), restarting via bootstrap in-tunnel", source: .tunnel)
 
-        if provider != .max {
-            // Set force_bootstrap so the auto-reconnect skips fast-connect
-            if let groupID = SharedLogger.appGroupID,
-               let defaults = UserDefaults(suiteName: groupID) {
-                defaults.set(true, forKey: "tb_force_bootstrap")
-                defaults.synchronize()
-            }
+        // For MAX, bootstrap through VK won't help — the link is static.
+        guard provider != .max else {
+            SharedLogger.error("[FastConnect] MAX link dead — refresh login_token/call via setup.sh", source: .tunnel)
+            self.cancelTunnelWithError(PacketTunnelProviderError.invalidProtocolConfiguration)
+            return
         }
 
-        self.cancelTunnelWithError(PacketTunnelProviderError.invalidProtocolConfiguration)
+        // In-tunnel bootstrap: stop current proxy + WG, restart with VK
+        // bootstrap path. iOS sees "reasserting" (briefly reconnecting),
+        // not "disconnected", so the user doesn't have to tap Connect again.
+        self.reasserting = true
+        self.stopCacheRefreshTimer()
+
+        self.adapter.stop { [weak self] _ in
+            guard let self = self else { return }
+            StopProxy()
+            SharedLogger.info("[FastConnect] Stopped dead proxy, starting VK bootstrap...", source: .tunnel)
+
+            let vkLink = self.savedVkLink
+            let fallback = self.savedFallbackLink
+            let peer = self.savedPeerAddr
+            let listen = self.savedListenAddr
+            let n = self.savedNValue
+            let linkSrv = self.savedLinkServer
+
+            DispatchQueue.global(qos: .userInteractive).async {
+                StartProxy(vkLink, fallback, peer, listen, n, linkSrv)
+            }
+
+            DispatchQueue.global(qos: .userInteractive).async { [weak self] in
+                let ready = ProxyWaitReady(45000)
+                guard let self = self else { return }
+
+                if ready == 0 {
+                    SharedLogger.error("[FastConnect] Bootstrap also failed", source: .tunnel)
+                    self.reasserting = false
+                    self.cancelTunnelWithError(PacketTunnelProviderError.invalidProtocolConfiguration)
+                    return
+                }
+
+                guard let tunnelConfig = self.savedTunnelConfig else {
+                    SharedLogger.error("[FastConnect] No saved tunnel config", source: .tunnel)
+                    self.reasserting = false
+                    self.cancelTunnelWithError(PacketTunnelProviderError.invalidProtocolConfiguration)
+                    return
+                }
+
+                SharedLogger.info("[FastConnect] Bootstrap proxy ready, restarting WG...", source: .tunnel)
+                self.adapter.start(tunnelConfiguration: tunnelConfig) { [weak self] error in
+                    guard let self = self else { return }
+                    self.reasserting = false
+                    if let error = error {
+                        SharedLogger.error("[FastConnect] WG restart failed: \(error)", source: .tunnel)
+                        self.cancelTunnelWithError(error)
+                    } else {
+                        SharedLogger.info("[FastConnect] Bootstrap successful, tunnel restored", source: .tunnel)
+                        self.fetchUpdatedLinks()
+                        self.startCacheRefreshTimer()
+                    }
+                }
+            }
+        }
     }
 
     // MARK: - Link auto-refresh

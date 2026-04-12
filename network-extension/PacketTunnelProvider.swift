@@ -258,6 +258,15 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                     // periodic refresh so the cache stays warm while the tunnel is up.
                     self.fetchUpdatedLinks()
                     self.startCacheRefreshTimer()
+
+                    // Fast-connect health check: if WG handshake doesn't complete
+                    // within 3s, the cached link likely points to a dead room
+                    // (bridge was restarted into a new room by link-refresh).
+                    // Invalidate cache and cancel so the system auto-reconnects
+                    // through VK bootstrap with a fresh link.
+                    if useDirectPath {
+                        self.scheduleHandshakeCheck(server: serverID, provider: providerType)
+                    }
                 }
                 completionHandler(adapterError)
             }
@@ -383,6 +392,59 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             let data = try? JSONSerialization.data(withJSONObject: stats)
             completionHandler?(data)
         }
+    }
+
+    // MARK: - Fast-connect handshake health check
+
+    /// After a fast-connect (direct path) start, verify WG handshake completes
+    /// within 3 seconds. If the cached link pointed at a dead room (bridge was
+    /// rotated by link-refresh), no valid WG response will arrive. In that case
+    /// invalidate the cache and tear down the tunnel so the system auto-reconnects
+    /// through VK bootstrap with a fresh link.
+    private func scheduleHandshakeCheck(server: String, provider: ProviderType) {
+        DispatchQueue.global(qos: .userInteractive).asyncAfter(deadline: .now() + 3.0) { [weak self] in
+            guard let self = self else { return }
+            self.adapter.getRuntimeConfiguration { [weak self] configStr in
+                guard let self = self else { return }
+                guard let configStr = configStr else {
+                    SharedLogger.error("[FastConnect] Health check: no runtime config", source: .tunnel)
+                    self.handleDeadDirectPath(server: server, provider: provider)
+                    return
+                }
+                // Parse last_handshake_time_sec from UAPI output
+                var hasHandshake = false
+                for line in configStr.split(separator: "\n") {
+                    if line.hasPrefix("last_handshake_time_sec="),
+                       let val = Int64(line.dropFirst("last_handshake_time_sec=".count)),
+                       val > 0 {
+                        hasHandshake = true
+                        break
+                    }
+                }
+                if hasHandshake {
+                    SharedLogger.info("[FastConnect] Health check passed — WG handshake OK", source: .tunnel)
+                } else {
+                    SharedLogger.warning("[FastConnect] Health check FAILED — no WG handshake after 3s, cached link is dead", source: .tunnel)
+                    self.handleDeadDirectPath(server: server, provider: provider)
+                }
+            }
+        }
+    }
+
+    private func handleDeadDirectPath(server: String, provider: ProviderType) {
+        LinkCache.shared.invalidate(server: server, provider: provider)
+        SharedLogger.info("[FastConnect] Cache invalidated for \(provider.rawValue)@\(server), restarting via bootstrap", source: .tunnel)
+
+        if provider != .max {
+            // Set force_bootstrap so the auto-reconnect skips fast-connect
+            if let groupID = SharedLogger.appGroupID,
+               let defaults = UserDefaults(suiteName: groupID) {
+                defaults.set(true, forKey: "tb_force_bootstrap")
+                defaults.synchronize()
+            }
+        }
+
+        self.cancelTunnelWithError(PacketTunnelProviderError.invalidProtocolConfiguration)
     }
 
     // MARK: - Link auto-refresh

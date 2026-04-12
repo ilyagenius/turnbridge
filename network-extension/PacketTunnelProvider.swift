@@ -420,7 +420,12 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     /// invalidate the cache and tear down the tunnel so the system auto-reconnects
     /// through VK bootstrap with a fresh link.
     private func scheduleHandshakeCheck(server: String, provider: ProviderType) {
-        DispatchQueue.global(qos: .userInteractive).asyncAfter(deadline: .now() + 3.0) { [weak self] in
+        // 8s timeout: when n workers join a WebRTC room simultaneously, the SFU
+        // must renegotiate the bridge's subscriber PC to include the new publishers.
+        // The first WG handshake initiation may be lost (bridge not subscribed yet).
+        // WG retries at 5s, by which point the bridge is ready. 8s gives enough
+        // margin for SFU renegotiation + WG retry + bridge response round-trip.
+        DispatchQueue.global(qos: .userInteractive).asyncAfter(deadline: .now() + 8.0) { [weak self] in
             guard let self = self else { return }
             self.adapter.getRuntimeConfiguration { [weak self] configStr in
                 guard let self = self else { return }
@@ -442,7 +447,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 if hasHandshake {
                     SharedLogger.info("[FastConnect] Health check passed — WG handshake OK", source: .tunnel)
                 } else {
-                    SharedLogger.warning("[FastConnect] Health check FAILED — no WG handshake after 3s, cached link is dead", source: .tunnel)
+                    SharedLogger.warning("[FastConnect] Health check FAILED — no WG handshake after 8s, cached link is dead", source: .tunnel)
                     self.handleDeadDirectPath(server: server, provider: provider)
                 }
             }
@@ -469,7 +474,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         self.adapter.stop { [weak self] _ in
             guard let self = self else { return }
             StopProxy()
-            SharedLogger.info("[FastConnect] Stopped dead proxy, starting VK bootstrap...", source: .tunnel)
+            SharedLogger.info("[FastConnect] Stopped dead proxy, waiting for port release...", source: .tunnel)
 
             let vkLink = self.savedVkLink
             let fallback = self.savedFallbackLink
@@ -478,7 +483,11 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             let n = self.savedNValue
             let linkSrv = self.savedLinkServer
 
-            DispatchQueue.global(qos: .userInteractive).async {
+            // StopProxy cancels the Go context but goroutines release the UDP
+            // listener asynchronously. Wait briefly for port 9000 to be freed
+            // before starting the new proxy, otherwise bind fails with EADDRINUSE.
+            DispatchQueue.global(qos: .userInteractive).asyncAfter(deadline: .now() + 1.5) {
+                SharedLogger.info("[FastConnect] Starting VK bootstrap...", source: .tunnel)
                 StartProxy(vkLink, fallback, peer, listen, n, linkSrv)
             }
 

@@ -1,19 +1,14 @@
 #!/bin/bash
-# setup.sh — Full TurnBridge server setup
-# Clones, builds, and configures everything automatically.
-# User only needs to: run yandex-login.js for cookies (one-time).
+# setup.sh — Full TurnBridge server setup from scratch
+# Usage: ssh into your VPS and run:
+#   curl -sL https://raw.githubusercontent.com/ilyagenius/turnbridge-private/main/server/setup.sh | bash
+# Or clone the repo and run: ./server/setup.sh
 #
-# Usage:
-#   git clone <turnbridge-private repo>
-#   cd turnbridge-private/server
-#   sudo GH_TOKEN_VK=<token> GH_TOKEN_JAZZ=<token> ./setup.sh
-#
-# Tokens are needed to clone private repos (vk-turn-proxy-v2, jazz-turn-proxy).
-# If bins/ directory has pre-built binaries, tokens are not required.
+# Requires: Ubuntu 22.04+ / Debian 12+, root or sudo access
 
 set -euo pipefail
 
-# === Configuration ===
+# === Configuration (edit these) ===
 WG_PORT=51820
 WG_ADDR="10.77.77.1/24"
 VK_PROXY_PORT=56000
@@ -22,22 +17,15 @@ INSTALL_DIR="/opt/turnbridge"
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 log()  { echo -e "${GREEN}[+]${NC} $*"; }
 warn() { echo -e "${YELLOW}[!]${NC} $*"; }
-err()  { echo -e "${RED}[x]${NC} $*"; }
+err()  { echo -e "${RED}[!]${NC} $*"; }
 
 if [ "$(id -u)" -ne 0 ]; then
-    err "Run as root: sudo GH_TOKEN_VK=... GH_TOKEN_JAZZ=... ./setup.sh"
+    err "Run as root or with sudo"
     exit 1
 fi
 
 REAL_USER="${SUDO_USER:-$(whoami)}"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-
-GH_TOKEN_VK="${GH_TOKEN_VK:-}"
-GH_TOKEN_JAZZ="${GH_TOKEN_JAZZ:-}"
-
-log "TurnBridge server setup for user: $REAL_USER"
-echo ""
+log "Setting up TurnBridge server for user: $REAL_USER"
 
 # ============================================================
 # 1. System packages
@@ -45,133 +33,87 @@ echo ""
 log "Installing system packages..."
 apt-get update -qq
 apt-get install -y -qq wireguard wireguard-tools golang-go nodejs npm curl jq > /dev/null
-log "Packages installed"
 
 # ============================================================
-# 2. WireGuard
+# 2. WireGuard setup
 # ============================================================
 if [ ! -f /etc/wireguard/wg0.conf ]; then
     log "Configuring WireGuard..."
     SERVER_PRIVKEY=$(wg genkey)
     SERVER_PUBKEY=$(echo "$SERVER_PRIVKEY" | wg pubkey)
+
+    # Generate a client keypair too
     CLIENT_PRIVKEY=$(wg genkey)
     CLIENT_PUBKEY=$(echo "$CLIENT_PRIVKEY" | wg pubkey)
-
-    # Detect main network interface
-    MAIN_IFACE=$(ip route show default | awk '/default/ {print $5}' | head -1)
-    [ -z "$MAIN_IFACE" ] && MAIN_IFACE="eth0"
 
     cat > /etc/wireguard/wg0.conf <<EOF
 [Interface]
 PrivateKey = $SERVER_PRIVKEY
 Address = $WG_ADDR
 ListenPort = $WG_PORT
-PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o $MAIN_IFACE -j MASQUERADE
-PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o $MAIN_IFACE -j MASQUERADE
+PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE
 
 [Peer]
+# Client
 PublicKey = $CLIENT_PUBKEY
 AllowedIPs = 10.77.77.2/32
 EOF
+
     chmod 600 /etc/wireguard/wg0.conf
 
+    # Enable IP forwarding
     sysctl -w net.ipv4.ip_forward=1 > /dev/null
     echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-turnbridge.conf
 
     systemctl enable --now wg-quick@wg0
 
-    SERVER_IP=$(curl -s4 --connect-timeout 5 ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}')
+    SERVER_IP=$(curl -s4 ifconfig.me || hostname -I | awk '{print $1}')
 
-    # Save client config
-    mkdir -p "$INSTALL_DIR"
-    cat > "$INSTALL_DIR/client_wg.conf" <<EOF
-[Interface]
-PrivateKey = $CLIENT_PRIVKEY
-Address = 10.77.77.2/24
-DNS = 8.8.8.8
-MTU = 1180
-
-[Peer]
-PublicKey = $SERVER_PUBKEY
-AllowedIPs = 0.0.0.0/0, ::/0
-Endpoint = $SERVER_IP:$WG_PORT
-PersistentKeepalive = 25
-EOF
-    log "WireGuard configured (client config: $INSTALL_DIR/client_wg.conf)"
+    echo ""
+    log "WireGuard configured!"
+    echo "  Server public key: $SERVER_PUBKEY"
+    echo "  Server endpoint:   $SERVER_IP:$WG_PORT"
+    echo ""
+    warn "Client WireGuard config (save this!):"
+    echo "  ----------------------------------------"
+    echo "  [Interface]"
+    echo "  PrivateKey = $CLIENT_PRIVKEY"
+    echo "  Address = 10.77.77.2/24"
+    echo "  DNS = 8.8.8.8"
+    echo "  MTU = 1180"
+    echo ""
+    echo "  [Peer]"
+    echo "  PublicKey = $SERVER_PUBKEY"
+    echo "  AllowedIPs = 0.0.0.0/0, ::/0"
+    echo "  Endpoint = $SERVER_IP:$WG_PORT"
+    echo "  PersistentKeepalive = 25"
+    echo "  ----------------------------------------"
+    echo ""
 else
-    log "WireGuard already configured"
+    log "WireGuard already configured, skipping"
     systemctl enable --now wg-quick@wg0 2>/dev/null || true
 fi
 
 # ============================================================
-# 3. Directory structure
+# 3. Create directory structure
 # ============================================================
+log "Creating $INSTALL_DIR..."
 mkdir -p "$INSTALL_DIR/link-refresh"
 chown -R "$REAL_USER:$REAL_USER" "$INSTALL_DIR"
 
 # ============================================================
-# Helper: install Go binary (bins/ -> clone+build -> fail)
+# 4. vk-turn-proxy (VK / WB TURN relay)
 # ============================================================
-install_go_binary() {
-    local NAME="$1"
-    local REPO_URL="$2"
-    local BUILD_SUBDIR="$3"
-    local OUTPUT="$INSTALL_DIR/$NAME"
-
-    # Already installed?
-    if [ -f "$OUTPUT" ] && [ "$(stat -c%s "$OUTPUT" 2>/dev/null || echo 0)" -gt 1000 ]; then
-        log "$NAME already installed ($(du -h "$OUTPUT" | cut -f1))"
-        return 0
-    fi
-
-    # Try 1: pre-built in bins/
-    for BINS_DIR in "$SCRIPT_DIR/bins" "$REPO_ROOT/bins"; do
-        if [ -f "$BINS_DIR/$NAME" ] && [ "$(stat -c%s "$BINS_DIR/$NAME")" -gt 1000 ]; then
-            cp "$BINS_DIR/$NAME" "$OUTPUT"
-            chmod +x "$OUTPUT"
-            log "$NAME installed from bins/ ($(du -h "$OUTPUT" | cut -f1))"
-            return 0
-        fi
-    done
-
-    # Try 2: clone and build
-    if [ -z "$REPO_URL" ]; then
-        err "$NAME: not found in bins/ and no repo URL provided"
-        err "Either place pre-built binary in server/bins/$NAME or provide GH_TOKEN"
-        return 1
-    fi
-
-    if ! command -v go >/dev/null 2>&1; then
-        err "$NAME: not found in bins/ and Go is not installed"
-        return 1
-    fi
-
-    log "Building $NAME from source..."
-    local TMP_DIR
-    TMP_DIR=$(mktemp -d)
-    if ! git clone "$REPO_URL" "$TMP_DIR" >/dev/null 2>&1; then
-        rm -rf "$TMP_DIR"
-        err "$NAME: git clone failed — check your token"
-        return 1
-    fi
-
-    cd "$TMP_DIR/$BUILD_SUBDIR"
-    if ! CGO_ENABLED=0 go build -o "$OUTPUT" . 2>&1; then
-        rm -rf "$TMP_DIR"
-        err "$NAME: go build failed"
-        return 1
-    fi
-    rm -rf "$TMP_DIR"
-    chmod +x "$OUTPUT"
-    log "$NAME built from source ($(du -h "$OUTPUT" | cut -f1))"
-}
-
-# ============================================================
-# 4. vk-turn-proxy (VK TURN relay v2, multi-stream)
-# ============================================================
-VK_REPO=""
-[ -n "$GH_TOKEN_VK" ] && VK_REPO="https://${GH_TOKEN_VK}@github.com/ilyagenius/vk-turn-proxy-v2.git"
-install_go_binary "vk-turn-proxy" "$VK_REPO" "server" || exit 1
+if [ ! -f "$INSTALL_DIR/vk-turn-proxy" ]; then
+    log "Downloading vk-turn-proxy..."
+    VK_PROXY_URL="https://github.com/cacggghp/vk-turn-proxy/releases/download/v1.0.0/vk-turn-proxy-linux-amd64"
+    curl -sL "$VK_PROXY_URL" -o "$INSTALL_DIR/vk-turn-proxy"
+    chmod +x "$INSTALL_DIR/vk-turn-proxy"
+    log "Downloaded vk-turn-proxy"
+else
+    log "vk-turn-proxy already exists, skipping"
+fi
 
 cat > /etc/systemd/system/vk-turn-proxy.service <<EOF
 [Unit]
@@ -179,7 +121,7 @@ Description=VK TURN Proxy
 After=network.target wg-quick@wg0.service
 
 [Service]
-ExecStart=$INSTALL_DIR/vk-turn-proxy -listen :$VK_PROXY_PORT -connect 127.0.0.1:$WG_PORT
+ExecStart=$INSTALL_DIR/vk-turn-proxy -listen :$VK_PROXY_PORT
 Restart=always
 RestartSec=3
 User=$REAL_USER
@@ -188,58 +130,53 @@ User=$REAL_USER
 WantedBy=multi-user.target
 EOF
 
-# ============================================================
-# 5. jazz-turn-proxy (Jazz + Telemost WebRTC bridge)
-# ============================================================
-JAZZ_REPO=""
-[ -n "$GH_TOKEN_JAZZ" ] && JAZZ_REPO="https://${GH_TOKEN_JAZZ}@github.com/ilyagenius/jazz-turn-proxy.git"
-install_go_binary "jazz-turn-proxy" "$JAZZ_REPO" "." || exit 1
-
-cat > /etc/systemd/system/jazz-proxy.service <<EOF
-[Unit]
-Description=Jazz Proxy (creates Jazz room, bridges WebRTC to WireGuard)
-After=network.target wg-quick@wg0.service
-
-[Service]
-ExecStart=$INSTALL_DIR/jazz-turn-proxy -wg 127.0.0.1:$WG_PORT
-Restart=always
-RestartSec=5
-User=$REAL_USER
-
-[Install]
-WantedBy=multi-party.target
-EOF
-
-cat > /etc/systemd/system/telemost-bridge.service <<EOF
-[Unit]
-Description=Telemost Bridge (bridges Telemost WebRTC to WireGuard)
-After=network.target wg-quick@wg0.service
-
-[Service]
-ExecStart=$INSTALL_DIR/jazz-turn-proxy --telemost-room https://telemost.yandex.ru/j/PLACEHOLDER -wg 127.0.0.1:$WG_PORT
-Restart=always
-RestartSec=5
-User=$REAL_USER
-
-[Install]
-WantedBy=multi-user.target
-EOF
+systemctl daemon-reload
+systemctl enable --now vk-turn-proxy
 
 # ============================================================
-# 6. link-server
+# 5. link-server (Go build)
 # ============================================================
-if [ -f "$SCRIPT_DIR/link-server/main.go" ] && command -v go >/dev/null 2>&1; then
-    log "Building link-server from source..."
+log "Building link-server..."
+
+# Check if source exists locally (running from repo)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$SCRIPT_DIR/link-server/main.go" ]; then
     cd "$SCRIPT_DIR/link-server"
     GOFLAGS="" CGO_ENABLED=0 go build -o "$INSTALL_DIR/link-server" .
-    log "link-server built"
+    log "Built link-server from local source"
 else
-    install_go_binary "link-server" "" "" || exit 1
-fi
+    # Minimal inline build
+    warn "link-server source not found, creating minimal version..."
+    cat > /tmp/link-server-main.go <<'GOEOF'
+package main
 
-if [ ! -f "$INSTALL_DIR/links.json" ]; then
-    echo '{"jazz":"","telemost":"","updated":""}' > "$INSTALL_DIR/links.json"
-    chown "$REAL_USER:$REAL_USER" "$INSTALL_DIR/links.json"
+import (
+	"flag"
+	"log"
+	"net/http"
+	"os"
+)
+
+func main() {
+	listen := flag.String("listen", "10.77.77.1:8080", "Listen address")
+	linksFile := flag.String("links", "/opt/turnbridge/links.json", "Path to links.json")
+	flag.Parse()
+	http.HandleFunc("/links", func(w http.ResponseWriter, r *http.Request) {
+		data, err := os.ReadFile(*linksFile)
+		if err != nil {
+			http.Error(w, "links not available", http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(data)
+		log.Printf("served links to %s", r.RemoteAddr)
+	})
+	log.Printf("listening on %s", *listen)
+	log.Fatal(http.ListenAndServe(*listen, nil))
+}
+GOEOF
+    cd /tmp && go build -o "$INSTALL_DIR/link-server" link-server-main.go
+    rm -f link-server-main.go
 fi
 
 cat > /etc/systemd/system/link-server.service <<EOF
@@ -257,24 +194,37 @@ User=$REAL_USER
 WantedBy=multi-user.target
 EOF
 
+# Create initial empty links.json
+if [ ! -f "$INSTALL_DIR/links.json" ]; then
+    echo '{"jazz":"","telemost":"","updated":""}' > "$INSTALL_DIR/links.json"
+    chown "$REAL_USER:$REAL_USER" "$INSTALL_DIR/links.json"
+fi
+
+systemctl daemon-reload
+systemctl enable --now link-server
+
 # ============================================================
-# 7. Link refresh (Node.js + Playwright)
+# 6. Link refresh scripts (Node.js + Playwright)
 # ============================================================
 log "Setting up link-refresh..."
-cp "$SCRIPT_DIR/link-refresh/"*.js "$INSTALL_DIR/link-refresh/" 2>/dev/null || true
-cp "$SCRIPT_DIR/link-refresh/refresh.sh" "$INSTALL_DIR/link-refresh/" 2>/dev/null || true
-cp "$SCRIPT_DIR/link-refresh/package.json" "$INSTALL_DIR/link-refresh/" 2>/dev/null || true
-chmod +x "$INSTALL_DIR/link-refresh/refresh.sh" 2>/dev/null || true
+
+if [ -d "$SCRIPT_DIR/link-refresh" ]; then
+    cp "$SCRIPT_DIR/link-refresh/"*.js "$INSTALL_DIR/link-refresh/"
+    cp "$SCRIPT_DIR/link-refresh/refresh.sh" "$INSTALL_DIR/link-refresh/"
+    cp "$SCRIPT_DIR/link-refresh/package.json" "$INSTALL_DIR/link-refresh/"
+fi
+chmod +x "$INSTALL_DIR/link-refresh/refresh.sh"
 chown -R "$REAL_USER:$REAL_USER" "$INSTALL_DIR"
 
-log "Installing Node.js deps + Playwright..."
+log "Installing Playwright..."
 cd "$INSTALL_DIR/link-refresh"
-sudo -u "$REAL_USER" npm install --omit=dev 2>/dev/null || warn "npm install failed"
-sudo -u "$REAL_USER" npx playwright install chromium --with-deps 2>/dev/null || warn "Playwright install needs manual fix"
+sudo -u "$REAL_USER" npm install --omit=dev 2>/dev/null || true
+sudo -u "$REAL_USER" npx playwright install chromium --with-deps 2>/dev/null || warn "Playwright install may need manual steps"
 
+# Systemd timers for link refresh
 cat > /etc/systemd/system/link-refresh.service <<EOF
 [Unit]
-Description=TurnBridge Link Refresh (Jazz + Telemost)
+Description=TurnBridge Link Refresh
 
 [Service]
 Type=oneshot
@@ -318,56 +268,46 @@ Persistent=true
 WantedBy=timers.target
 EOF
 
-# ============================================================
-# 8. Sudoers for link-refresh
-# ============================================================
-cat > /etc/sudoers.d/turnbridge <<SUDOEOF
-$REAL_USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl daemon-reload
-$REAL_USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart jazz-proxy
-$REAL_USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart telemost-bridge
-$REAL_USER ALL=(ALL) NOPASSWD: /usr/bin/journalctl *
-$REAL_USER ALL=(ALL) NOPASSWD: /usr/bin/sed -i *
-$REAL_USER ALL=(ALL) NOPASSWD: /bin/mv /tmp/*.service /tmp/*.timer /etc/systemd/system/
-SUDOEOF
-chmod 440 /etc/sudoers.d/turnbridge
+systemctl daemon-reload
+systemctl enable link-refresh.timer yandex-session.timer
+systemctl start link-refresh.timer yandex-session.timer
 
 # ============================================================
-# 9. Start everything
+# 7. Sudoers for link-refresh (needs to restart jazz-proxy)
 # ============================================================
-log "Starting all services..."
-systemctl daemon-reload
-fuser -k $VK_PROXY_PORT/udp 2>/dev/null || true
-systemctl enable --now vk-turn-proxy jazz-proxy link-server 2>/dev/null
-systemctl enable --now link-refresh.timer yandex-session.timer 2>/dev/null
-systemctl enable telemost-bridge 2>/dev/null
+log "Configuring sudoers for link-refresh..."
+cat > /etc/sudoers.d/turnbridge <<EOF
+$REAL_USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl daemon-reload
+$REAL_USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart jazz-proxy
+$REAL_USER ALL=(ALL) NOPASSWD: /usr/bin/journalctl *
+$REAL_USER ALL=(ALL) NOPASSWD: /usr/bin/sed -i *jazz-proxy*
+$REAL_USER ALL=(ALL) NOPASSWD: /bin/mv /tmp/*.service /tmp/*.timer /etc/systemd/system/
+EOF
+chmod 440 /etc/sudoers.d/turnbridge
 
 # ============================================================
 # Done
 # ============================================================
 echo ""
-echo -e "${GREEN}============================================${NC}"
+echo "============================================"
 log "TurnBridge server setup complete!"
-echo -e "${GREEN}============================================${NC}"
+echo "============================================"
 echo ""
-echo "Services:"
-echo "  - wireguard (wg0)          : $(systemctl is-active wg-quick@wg0 2>/dev/null || echo 'inactive')"
-echo "  - vk-turn-proxy (:$VK_PROXY_PORT)  : $(systemctl is-active vk-turn-proxy 2>/dev/null || echo 'inactive')"
-echo "  - jazz-proxy               : $(systemctl is-active jazz-proxy 2>/dev/null || echo 'inactive')"
-echo "  - telemost-bridge          : $(systemctl is-active telemost-bridge 2>/dev/null || echo 'inactive')"
-echo "  - link-server (10.77.77.1) : $(systemctl is-active link-server 2>/dev/null || echo 'inactive')"
-echo "  - link-refresh.timer       : $(systemctl is-active link-refresh.timer 2>/dev/null || echo 'inactive')"
-echo "  - yandex-session.timer     : $(systemctl is-active yandex-session.timer 2>/dev/null || echo 'inactive')"
+echo "Running services:"
+echo "  - wireguard (wg0)         : $(systemctl is-active wg-quick@wg0)"
+echo "  - vk-turn-proxy (:$VK_PROXY_PORT) : $(systemctl is-active vk-turn-proxy)"
+echo "  - link-server (10.77.77.1:8080): $(systemctl is-active link-server)"
+echo "  - link-refresh.timer      : $(systemctl is-active link-refresh.timer)"
+echo "  - yandex-session.timer    : $(systemctl is-active yandex-session.timer)"
 echo ""
-
-if [ -f "$INSTALL_DIR/client_wg.conf" ]; then
-    echo -e "${YELLOW}Client WG config: $INSTALL_DIR/client_wg.conf${NC}"
-    echo ""
-fi
-
-echo -e "${YELLOW}Last step — Yandex cookies (one-time):${NC}"
-echo "  cd $INSTALL_DIR/link-refresh && node yandex-login.js"
-echo "  $INSTALL_DIR/link-refresh/refresh.sh"
-echo ""
-echo "Then generate client link:"
-echo "  cd $REPO_ROOT && python3 quick_link.py"
+warn "Manual steps remaining:"
+echo "  1. Place jazz-turn-proxy and jazz-proxy binaries in $INSTALL_DIR/"
+echo "     (distributed privately — contact @ilkl34 on Telegram)"
+echo "  2. Create their systemd services"
+echo "  3. Run initial Yandex login:"
+echo "       cd $INSTALL_DIR/link-refresh && node yandex-login.js"
+echo "  4. Run first link refresh:"
+echo "       $INSTALL_DIR/link-refresh/refresh.sh"
+echo "  5. Generate client config link:"
+echo "       python3 quick_link.py"
 echo ""

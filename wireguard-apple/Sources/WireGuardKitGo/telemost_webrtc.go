@@ -16,10 +16,16 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
+	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
 )
 
 const telemostAPIBase = "https://cloud-api.yandex.ru/telemost_front/v2/telemost"
+
+// telemostHBMode — verification build. "2" = audio RTP heartbeat; "" = production.
+// When set, audio track writes HB2-ios-<seq> RTP every 2s; OnTrack logs incoming
+// HB payloads from the bridge. DC wiring stays up but is expected not to relay.
+const telemostHBMode = "2"
 
 func isTelemostLink(link string) bool {
 	parsed, err := url.Parse(strings.TrimSpace(link))
@@ -284,9 +290,10 @@ phase2:
 	}
 	defer pcPub.Close()
 
-	// Dummy audio track: Goloom SFU only relays DataChannel data between
-	// participants when the publisher has at least one media track.
-	audioTrack, err := webrtc.NewTrackLocalStaticSample(
+	// Audio track: StaticRTP so we can write raw RTP packets (needed for HB=2
+	// verification and for future WG-over-RTP tunneling if DC relay is confirmed
+	// non-functional).
+	audioTrack, err := webrtc.NewTrackLocalStaticRTP(
 		webrtc.RTPCodecCapability{
 			MimeType:    webrtc.MimeTypeOpus,
 			ClockRate:   48000,
@@ -294,7 +301,7 @@ phase2:
 			SDPFmtpLine: "minptime=10;useinbandfec=1",
 		},
 		"audio",
-		"telemost-bridge",
+		"telemost-ios",
 	)
 	if err != nil {
 		return fmt.Errorf("create audio track: %w", err)
@@ -304,6 +311,81 @@ phase2:
 		webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionSendonly},
 	); err != nil {
 		return fmt.Errorf("add audio transceiver: %w", err)
+	}
+
+	// HB=2: emit "HB2-ios-<seq>" as opus RTP every 2s. Bridge in HB=2 logs
+	// the tag on OnTrack — if we see it on both sides, RTP path works.
+	if telemostHBMode == "2" {
+		go func() {
+			t := time.NewTicker(2 * time.Second)
+			defer t.Stop()
+			var seq uint16
+			var ts uint32
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-t.C:
+					seq++
+					ts += 960
+					tag := []byte(fmt.Sprintf("HB2-ios-%s-%d", participantName, seq))
+					pkt := &rtp.Packet{
+						Header: rtp.Header{
+							Version:        2,
+							PayloadType:    111,
+							SequenceNumber: seq,
+							Timestamp:      ts,
+							Marker:         true,
+						},
+						Payload: tag,
+					}
+					if err := audioTrack.WriteRTP(pkt); err != nil {
+						log.Printf("Telemost HB2 WriteRTP err: %v", err)
+						continue
+					}
+					log.Printf("Telemost HB2 >>> %s", tag)
+				}
+			}
+		}()
+	}
+
+	// HB verification: log any incoming audio RTP; print tag if it's an HB payload.
+	if telemostHBMode == "2" {
+		pcSub.OnTrack(func(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
+			log.Printf("Telemost HB2 OnTrack: id=%s kind=%s codec=%s ssrc=%d",
+				track.ID(), track.Kind(), track.Codec().MimeType, track.SSRC())
+			go func() {
+				buf := make([]byte, 1500)
+				count := 0
+				for {
+					n, _, err := track.Read(buf)
+					if err != nil {
+						log.Printf("Telemost HB2 track.Read err: %v", err)
+						return
+					}
+					pkt := &rtp.Packet{}
+					if err := pkt.Unmarshal(buf[:n]); err != nil {
+						continue
+					}
+					count++
+					payload := pkt.Payload
+					if len(payload) > 1 && payload[0] == 0x78 {
+						payload = payload[1:]
+					}
+					if len(payload) > 2 && string(payload[:2]) == "HB" {
+						log.Printf("Telemost HB2 <<< %s (ssrc=%d seq=%d)",
+							payload, pkt.SSRC, pkt.SequenceNumber)
+					} else if count%50 == 1 {
+						dumpLen := len(pkt.Payload)
+						if dumpLen > 16 {
+							dumpLen = 16
+						}
+						log.Printf("Telemost HB2 <<< non-HB ssrc=%d seq=%d plen=%d first=%x (cnt=%d)",
+							pkt.SSRC, pkt.SequenceNumber, len(pkt.Payload), pkt.Payload[:dumpLen], count)
+					}
+				}
+			}()
+		})
 	}
 
 	// NOTE: no publisher DataChannel. Goloom DC-relay pattern routes WG traffic
@@ -521,6 +603,29 @@ phase2:
 				return
 			}
 			sendAck(uid)
+
+			// Subscribe to bridge's audio RTP. Required for HB=2 verification
+			// and (once confirmed) for any RTP-based WG tunneling path. Without
+			// this, Goloom sends slotsConfig with 0 audio slots.
+			_ = writeJSON(map[string]any{
+				"uid":            uuid.New().String(),
+				"setSlotsOffset": map[string]any{"offset": 0},
+			})
+			_ = writeJSON(map[string]any{
+				"uid": uuid.New().String(),
+				"setSlots": map[string]any{
+					"slots": []map[string]any{
+						{"width": 320, "height": 180},
+					},
+					"audioSlotsCount":    5,
+					"key":                1,
+					"shutdownAllVideo":   false,
+					"withSelfView":       false,
+					"selfViewVisibility": "HIDE",
+					"gridConfig":         map[string]any{},
+				},
+			})
+			log.Printf("Telemost setSlots sent (audioSlotsCount=5)")
 			return
 
 		case "webrtcIceCandidate":

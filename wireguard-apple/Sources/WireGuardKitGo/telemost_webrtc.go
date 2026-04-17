@@ -89,6 +89,35 @@ func fetchTelemostConnectionInfo(roomURL, displayName string) (*telemostConnInfo
 	return &info, nil
 }
 
+// logDescription prints participant description changes (upsert/update/remove)
+// so we can observe who has sendVideo/sendAudio enabled on the server side.
+func logDescription(kind string, d map[string]any) {
+	parts, _ := d["participants"].([]any)
+	for _, raw := range parts {
+		p, _ := raw.(map[string]any)
+		if p == nil {
+			continue
+		}
+		id, _ := p["id"].(string)
+		if id == "" {
+			if pa, _ := p["participantAttributes"].(map[string]any); pa != nil {
+				id, _ = pa["participantId"].(string)
+			}
+		}
+		name, _ := p["name"].(string)
+		if name == "" {
+			if pa, _ := p["participantAttributes"].(map[string]any); pa != nil {
+				name, _ = pa["name"].(string)
+			}
+		}
+		sendAudio, _ := p["sendAudio"].(bool)
+		sendVideo, _ := p["sendVideo"].(bool)
+		sendShare, _ := p["sendSharing"].(bool)
+		log.Printf("Telemost %s id=%q name=%q sendAudio=%v sendVideo=%v sendSharing=%v",
+			kind, id, name, sendAudio, sendVideo, sendShare)
+	}
+}
+
 func telemostICEConfig(conn *telemostConnInfo) []webrtc.ICEServer {
 	servers := []webrtc.ICEServer{
 		{URLs: []string{"stun:stun.rtc.yandex.net:3478"}},
@@ -307,6 +336,39 @@ func startTelemostWebRTCProxy(ctx context.Context, roomURL string, listenConn ne
 	// Signaling loop.
 	go func() {
 		pubSent := false
+		slotsSent := false
+		slotsKey := 0
+
+		// sendSlots sends setSlotsOffset + setSlots so Goloom binds incoming
+		// participants' video mids to subscriber slots. Without this the server
+		// emits only an initial empty slotsConfig and never populates mids.
+		sendSlots := func() {
+			if slotsSent {
+				return
+			}
+			slotsSent = true
+			_ = writeJSON(map[string]any{
+				"uid":            uuid.New().String(),
+				"setSlotsOffset": map[string]any{"offset": 0},
+			})
+			slotsKey++
+			_ = writeJSON(map[string]any{
+				"uid": uuid.New().String(),
+				"setSlots": map[string]any{
+					"slots": []map[string]any{
+						{"width": 1280, "height": 720},
+						{"width": 640, "height": 360},
+					},
+					"audioSlotsCount":    0,
+					"key":                slotsKey,
+					"shutdownAllVideo":   false,
+					"withSelfView":       false,
+					"selfViewVisibility": "HIDE",
+					"gridConfig":         map[string]any{},
+				},
+			})
+			log.Printf("Telemost sent setSlotsOffset+setSlots key=%d (2 slots)", slotsKey)
+		}
 		for {
 			var msg map[string]any
 			if err := ws.ReadJSON(&msg); err != nil {
@@ -331,7 +393,8 @@ func startTelemostWebRTCProxy(ctx context.Context, roomURL string, listenConn ne
 				sendAck()
 			}
 
-			if _, ok := msg["updateDescription"]; ok {
+			if d, ok := msg["updateDescription"].(map[string]any); ok {
+				logDescription("updateDescription", d)
 				sendAck()
 			}
 
@@ -403,8 +466,9 @@ func startTelemostWebRTCProxy(ctx context.Context, roomURL string, listenConn ne
 				_ = writeJSON(map[string]any{
 					"uid": uuid.New().String(),
 					"publisherSdpOffer": map[string]any{
-						"pcSeq": 1,
-						"sdp":   pubOffer.SDP,
+						"pcSeq":  1,
+						"sdp":    pubOffer.SDP,
+						"tracks": []map[string]any{},
 					},
 				})
 				log.Printf("Telemost publisher offer sent")
@@ -423,6 +487,48 @@ func startTelemostWebRTCProxy(ctx context.Context, roomURL string, listenConn ne
 					}
 					return
 				}
+				sendAck()
+				// Request video slots AFTER publisher PC is fully negotiated.
+				sendSlots()
+			}
+
+			if _, ok := msg["slotsConfig"]; ok {
+				if raw, jerr := json.Marshal(msg["slotsConfig"]); jerr == nil {
+					log.Printf("Telemost slotsConfig RAW: %s", string(raw))
+				}
+				if cfg, ok := msg["slotsConfig"].(map[string]any); ok {
+					slots, _ := cfg["slots"].([]any)
+					key, _ := cfg["key"].(float64)
+					offset, _ := cfg["offset"].(float64)
+					for i, sRaw := range slots {
+						s, _ := sRaw.(map[string]any)
+						var vidMid, shareMid, pid, label string
+						label, _ = s["label"].(string)
+						if v, _ := s["participant"].(map[string]any); v != nil {
+							pid, _ = v["participantId"].(string)
+						}
+						if v, _ := s["participantVideoByMid"].(map[string]any); v != nil {
+							vidMid, _ = v["mid"].(string)
+							if pid == "" {
+								pid, _ = v["participantId"].(string)
+							}
+						}
+						if v, _ := s["participantScreenSharingByMid"].(map[string]any); v != nil {
+							shareMid, _ = v["mid"].(string)
+						}
+						log.Printf("Telemost slotsConfig key=%d off=%d slot[%d] label=%q pid=%q videoMid=%q shareMid=%q",
+							int(key), int(offset), i, label, pid, vidMid, shareMid)
+					}
+				}
+				sendAck()
+			}
+
+			if d, ok := msg["upsertDescription"].(map[string]any); ok {
+				logDescription("upsertDescription", d)
+				sendAck()
+			}
+			if d, ok := msg["removeDescription"].(map[string]any); ok {
+				logDescription("removeDescription", d)
 				sendAck()
 			}
 

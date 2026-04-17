@@ -177,10 +177,29 @@ func startTelemostWebRTCProxy(ctx context.Context, roomURL string, listenConn ne
 	}
 	defer pcPub.Close()
 
-	// Publisher DC: iOS sends WG packets to server.
-	pubDC, err := pcPub.CreateDataChannel("_reliable", nil)
+	// Goloom DC-relay pattern: publisher carries a dummy audio track (so the
+	// publisher stream is valid), but WG traffic flows over the SHARED subscriber
+	// DC (label=default) both ways, wrapped in LiveKit DataPacket protobuf.
+	// Matches server bridge; a publisher-only DC ("_reliable") is not routed by
+	// Goloom and gets closed shortly after open.
+	audioTrack, err := webrtc.NewTrackLocalStaticRTP(
+		webrtc.RTPCodecCapability{
+			MimeType:    webrtc.MimeTypeOpus,
+			ClockRate:   48000,
+			Channels:    2,
+			SDPFmtpLine: "minptime=10;useinbandfec=1",
+		},
+		"audio",
+		"turnbridge-ios",
+	)
 	if err != nil {
-		return fmt.Errorf("create publisher data channel: %w", err)
+		return fmt.Errorf("create audio track: %w", err)
+	}
+	if _, err := pcPub.AddTransceiverFromTrack(
+		audioTrack,
+		webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionSendonly},
+	); err != nil {
+		return fmt.Errorf("add audio transceiver: %w", err)
 	}
 
 	errCh := make(chan error, 4)
@@ -231,37 +250,37 @@ func startTelemostWebRTCProxy(ctx context.Context, roomURL string, listenConn ne
 		})
 	})
 
-	// Publisher DC open: signal proxy ready, then read from inCh and send to server.
-	pubDC.OnOpen(func() {
-		log.Printf("Established Telemost WebRTC data channel")
-		select {
-		case proxyReady <- struct{}{}:
-		default:
-		}
-
-		go func() {
-			for pkt := range inCh {
-				if err := pubDC.Send(pkt); err != nil {
-					log.Printf("Telemost local->DataChannel send failed: %v", err)
-					return
-				}
-			}
-		}()
-	})
-
-	// Subscriber DC: receive WG responses from server, write to local UDP.
+	// Shared subscriber DC (label=default) carries WG traffic BOTH ways.
+	// Outbound local->remote: wrap in LiveKit DataPacket and dc.Send.
+	// Inbound remote->local: decode DataPacket and write to the WG endpoint.
 	pcSub.OnDataChannel(func(dc *webrtc.DataChannel) {
-		log.Printf("Telemost subscriber DC: label=%s", dc.Label())
+		log.Printf("Telemost subscriber DC discovered: label=%s id=%v", dc.Label(), dc.ID())
+		dc.OnOpen(func() {
+			log.Printf("Telemost subDC OPEN: label=%s id=%v", dc.Label(), dc.ID())
+			select {
+			case proxyReady <- struct{}{}:
+			default:
+			}
+			go func() {
+				for pkt := range inCh {
+					if err := dc.Send(encodeDataPacket(pkt)); err != nil {
+						log.Printf("Telemost local->DC send failed: %v", err)
+						return
+					}
+				}
+			}()
+		})
 		dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-			if len(msg.Data) == 0 {
+			payload, ok := decodeDataPacket(msg.Data)
+			if !ok || len(payload) == 0 {
 				return
 			}
 			addr1, ok := wgAddr.Load().(net.Addr)
 			if !ok {
 				return
 			}
-			if _, err := listenConn.WriteTo(msg.Data, addr1); err != nil {
-				log.Printf("Telemost DataChannel->local write failed: %v", err)
+			if _, err := listenConn.WriteTo(payload, addr1); err != nil {
+				log.Printf("Telemost DC->local write failed: %v", err)
 			}
 		})
 	})
@@ -280,7 +299,7 @@ func startTelemostWebRTCProxy(ctx context.Context, roomURL string, listenConn ne
 				"name": participantName,
 				"role": "SPEAKER",
 			},
-			"sendAudio":     false,
+			"sendAudio":     true,
 			"sendVideo":     false,
 			"sendSharing":   false,
 			"participantId": conn.PeerID,
@@ -463,12 +482,43 @@ func startTelemostWebRTCProxy(ctx context.Context, roomURL string, listenConn ne
 					}
 					return
 				}
+				pubTracks := make([]map[string]any, 0, 2)
+				for _, tr := range pcPub.GetTransceivers() {
+					mid := tr.Mid()
+					if mid == "" {
+						continue
+					}
+					sender := tr.Sender()
+					if sender == nil || sender.Track() == nil {
+						continue
+					}
+					track := sender.Track()
+					var kind string
+					switch track.Kind() {
+					case webrtc.RTPCodecTypeAudio:
+						kind = "AUDIO"
+					case webrtc.RTPCodecTypeVideo:
+						kind = "VIDEO"
+					default:
+						continue
+					}
+					pubTracks = append(pubTracks, map[string]any{
+						"mid":            mid,
+						"transceiverMid": mid,
+						"kind":           kind,
+						"priority":       0,
+						"label":          track.ID(),
+						"codecs":         map[string]any{},
+						"groupId":        1,
+						"description":    "",
+					})
+				}
 				_ = writeJSON(map[string]any{
 					"uid": uuid.New().String(),
 					"publisherSdpOffer": map[string]any{
 						"pcSeq":  1,
 						"sdp":    pubOffer.SDP,
-						"tracks": []map[string]any{},
+						"tracks": pubTracks,
 					},
 				})
 				log.Printf("Telemost publisher offer sent")

@@ -22,10 +22,12 @@ import (
 
 const telemostAPIBase = "https://cloud-api.yandex.ru/telemost_front/v2/telemost"
 
-// telemostHBMode — verification build. "2" = audio RTP heartbeat; "" = production.
-// When set, audio track writes HB2-ios-<seq> RTP every 2s; OnTrack logs incoming
+// telemostHBMode — verification build. "2" = raw text heartbeat (dropped by Goloom
+// SFU because it validates Opus), "3" = 50Hz with 0x78 TOC prefix mimicking SILK NB
+// silence packets — passes SFU Opus validation. "" = production.
+// When set, audio track writes HB<mode>-ios-<seq> RTP; OnTrack logs incoming
 // HB payloads from the bridge. DC wiring stays up but is expected not to relay.
-const telemostHBMode = "2"
+const telemostHBMode = "3"
 
 func isTelemostLink(link string) bool {
 	parsed, err := url.Parse(strings.TrimSpace(link))
@@ -313,14 +315,22 @@ phase2:
 		return fmt.Errorf("add audio transceiver: %w", err)
 	}
 
-	// HB=2: emit "HB2-ios-<seq>" as opus RTP every 2s. Bridge in HB=2 logs
-	// the tag on OnTrack — if we see it on both sides, RTP path works.
-	if telemostHBMode == "2" {
+	// HB verification: emit HB<mode>-ios-<seq> as Opus RTP. Bridge logs it on OnTrack.
+	// HB=2 = 2s cadence, raw text — Goloom SFU drops (invalid Opus).
+	// HB=3 = 50Hz, 0x78 TOC prefix (SILK NB silence) — passes SFU validation.
+	if telemostHBMode == "2" || telemostHBMode == "3" {
 		go func() {
-			t := time.NewTicker(2 * time.Second)
+			interval := 2 * time.Second
+			logEvery := 1
+			if telemostHBMode == "3" {
+				interval = 20 * time.Millisecond
+				logEvery = 50
+			}
+			t := time.NewTicker(interval)
 			defer t.Stop()
 			var seq uint16
 			var ts uint32
+			counter := 0
 			for {
 				select {
 				case <-ctx.Done():
@@ -328,7 +338,12 @@ phase2:
 				case <-t.C:
 					seq++
 					ts += 960
-					tag := []byte(fmt.Sprintf("HB2-ios-%s-%d", participantName, seq))
+					counter++
+					tag := []byte(fmt.Sprintf("HB%s-ios-%s-%d", telemostHBMode, participantName, seq))
+					payload := tag
+					if telemostHBMode == "3" {
+						payload = append([]byte{0x78}, tag...)
+					}
 					pkt := &rtp.Packet{
 						Header: rtp.Header{
 							Version:        2,
@@ -337,30 +352,32 @@ phase2:
 							Timestamp:      ts,
 							Marker:         true,
 						},
-						Payload: tag,
+						Payload: payload,
 					}
 					if err := audioTrack.WriteRTP(pkt); err != nil {
-						log.Printf("Telemost HB2 WriteRTP err: %v", err)
+						log.Printf("Telemost HB%s WriteRTP err: %v", telemostHBMode, err)
 						continue
 					}
-					log.Printf("Telemost HB2 >>> %s", tag)
+					if counter%logEvery == 0 {
+						log.Printf("Telemost HB%s >>> %s (seq=%d)", telemostHBMode, tag, seq)
+					}
 				}
 			}
 		}()
 	}
 
 	// HB verification: log any incoming audio RTP; print tag if it's an HB payload.
-	if telemostHBMode == "2" {
+	if telemostHBMode == "2" || telemostHBMode == "3" {
 		pcSub.OnTrack(func(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
-			log.Printf("Telemost HB2 OnTrack: id=%s kind=%s codec=%s ssrc=%d",
-				track.ID(), track.Kind(), track.Codec().MimeType, track.SSRC())
+			log.Printf("Telemost HB%s OnTrack: id=%s kind=%s codec=%s ssrc=%d",
+				telemostHBMode, track.ID(), track.Kind(), track.Codec().MimeType, track.SSRC())
 			go func() {
 				buf := make([]byte, 1500)
 				count := 0
 				for {
 					n, _, err := track.Read(buf)
 					if err != nil {
-						log.Printf("Telemost HB2 track.Read err: %v", err)
+						log.Printf("Telemost HB%s track.Read err: %v", telemostHBMode, err)
 						return
 					}
 					pkt := &rtp.Packet{}
@@ -373,15 +390,15 @@ phase2:
 						payload = payload[1:]
 					}
 					if len(payload) > 2 && string(payload[:2]) == "HB" {
-						log.Printf("Telemost HB2 <<< %s (ssrc=%d seq=%d)",
-							payload, pkt.SSRC, pkt.SequenceNumber)
+						log.Printf("Telemost HB%s <<< %s (ssrc=%d seq=%d)",
+							telemostHBMode, payload, pkt.SSRC, pkt.SequenceNumber)
 					} else if count%50 == 1 {
 						dumpLen := len(pkt.Payload)
 						if dumpLen > 16 {
 							dumpLen = 16
 						}
-						log.Printf("Telemost HB2 <<< non-HB ssrc=%d seq=%d plen=%d first=%x (cnt=%d)",
-							pkt.SSRC, pkt.SequenceNumber, len(pkt.Payload), pkt.Payload[:dumpLen], count)
+						log.Printf("Telemost HB%s <<< non-HB ssrc=%d seq=%d plen=%d first=%x (cnt=%d)",
+							telemostHBMode, pkt.SSRC, pkt.SequenceNumber, len(pkt.Payload), pkt.Payload[:dumpLen], count)
 					}
 				}
 			}()

@@ -306,10 +306,11 @@ phase2:
 		return fmt.Errorf("add audio transceiver: %w", err)
 	}
 
-	pubDC, err := pcPub.CreateDataChannel("_reliable", nil)
-	if err != nil {
-		return fmt.Errorf("create publisher data channel: %w", err)
-	}
+	// NOTE: no publisher DataChannel. Goloom DC-relay pattern routes WG traffic
+	// over the SHARED subscriber DC (label=default) that the SFU opens via
+	// pcSub.OnDataChannel — same DC for both send and receive. A publisher-only
+	// "_reliable" DC isn't routed by Goloom and closes shortly after open
+	// (observed as "io: read/write on closed pipe" on first WG send).
 
 	for _, pc := range []*webrtc.PeerConnection{pcSub, pcPub} {
 		pc := pc
@@ -357,34 +358,37 @@ phase2:
 		})
 	})
 
-	pubDC.OnOpen(func() {
-		log.Printf("Telemost publisher DataChannel open")
-		select {
-		case proxyReady <- struct{}{}:
-		default:
-		}
-
-		go func() {
-			for pkt := range inCh {
-				if err := pubDC.Send(pkt); err != nil {
-					log.Printf("Telemost local->DC send failed: %v", err)
-					return
-				}
-			}
-		}()
-	})
-
+	// Shared subscriber DC (label=default) carries WG traffic BOTH ways.
+	// Outbound local->remote: wrap in LiveKit DataPacket protobuf and dc.Send.
+	// Inbound remote->local: decode DataPacket, write to WG endpoint.
+	// Goloom drops raw bytes — payload MUST be wrapped.
 	pcSub.OnDataChannel(func(dc *webrtc.DataChannel) {
-		log.Printf("Telemost subscriber DC: label=%s", dc.Label())
+		log.Printf("Telemost subscriber DC discovered: label=%s id=%v", dc.Label(), dc.ID())
+		dc.OnOpen(func() {
+			log.Printf("Telemost subDC OPEN: label=%s id=%v", dc.Label(), dc.ID())
+			select {
+			case proxyReady <- struct{}{}:
+			default:
+			}
+			go func() {
+				for pkt := range inCh {
+					if err := dc.Send(encodeDataPacket(pkt)); err != nil {
+						log.Printf("Telemost local->DC send failed: %v", err)
+						return
+					}
+				}
+			}()
+		})
 		dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-			if len(msg.Data) == 0 {
+			payload, ok := decodeDataPacket(msg.Data)
+			if !ok || len(payload) == 0 {
 				return
 			}
 			addr1, ok := wgAddr.Load().(net.Addr)
 			if !ok {
 				return
 			}
-			if _, err := listenConn.WriteTo(msg.Data, addr1); err != nil {
+			if _, err := listenConn.WriteTo(payload, addr1); err != nil {
 				log.Printf("Telemost DC->local write failed: %v", err)
 			}
 		})
@@ -459,11 +463,43 @@ phase2:
 				errCh <- fmt.Errorf("set publisher local desc: %w", err)
 				return
 			}
+			pubTracks := make([]map[string]any, 0, 2)
+			for _, tr := range pcPub.GetTransceivers() {
+				mid := tr.Mid()
+				if mid == "" {
+					continue
+				}
+				sender := tr.Sender()
+				if sender == nil || sender.Track() == nil {
+					continue
+				}
+				track := sender.Track()
+				var kind string
+				switch track.Kind() {
+				case webrtc.RTPCodecTypeAudio:
+					kind = "AUDIO"
+				case webrtc.RTPCodecTypeVideo:
+					kind = "VIDEO"
+				default:
+					continue
+				}
+				pubTracks = append(pubTracks, map[string]any{
+					"mid":            mid,
+					"transceiverMid": mid,
+					"kind":           kind,
+					"priority":       0,
+					"label":          track.ID(),
+					"codecs":         map[string]any{},
+					"groupId":        1,
+					"description":    "",
+				})
+			}
 			_ = writeJSON(map[string]any{
 				"uid": uuid.New().String(),
 				"publisherSdpOffer": map[string]any{
-					"pcSeq": 1,
-					"sdp":   pubOffer.SDP,
+					"pcSeq":  1,
+					"sdp":    pubOffer.SDP,
+					"tracks": pubTracks,
 				},
 			})
 			log.Printf("Telemost publisher offer sent")

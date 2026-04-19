@@ -22,13 +22,7 @@ import (
 
 const telemostAPIBase = "https://cloud-api.yandex.ru/telemost_front/v2/telemost"
 
-// telemostHBMode — verification build. "2" = raw text heartbeat (dropped by Goloom
-// SFU because it validates Opus), "3" = 50Hz with 0x78 TOC prefix mimicking SILK NB
-// silence packets — passes SFU Opus validation. "" = production.
-// When set, audio track writes HB<mode>-ios-<seq> RTP; OnTrack logs incoming
-// HB payloads from the bridge. DC wiring stays up but is expected not to relay.
-const telemostHBMode = "3"
-
+// isTelemostLink detects Telemost room links: https://telemost.yandex.ru/j/ROOM_ID
 func isTelemostLink(link string) bool {
 	parsed, err := url.Parse(strings.TrimSpace(link))
 	if err != nil {
@@ -96,55 +90,84 @@ func fetchTelemostConnectionInfo(roomURL, displayName string) (*telemostConnInfo
 	return &info, nil
 }
 
-// parseICEServersFromServerHello extracts TURN credentials from serverHello.rtcConfiguration.iceServers.
-// Goloom moved TURN credentials from the API response to serverHello (April 2026).
-func parseICEServersFromServerHello(sh map[string]any) []webrtc.ICEServer {
-	rtcCfg, ok := sh["rtcConfiguration"].(map[string]any)
-	if !ok {
-		return nil
+func telemostICEConfig(conn *telemostConnInfo) []webrtc.ICEServer {
+	servers := []webrtc.ICEServer{
+		{URLs: []string{"stun:stun.rtc.yandex.net:3478"}},
 	}
-	servers, ok := rtcCfg["iceServers"].([]any)
-	if !ok || len(servers) == 0 {
-		return nil
+	for _, s := range conn.ClientConfig.ICEServers {
+		servers = append(servers, webrtc.ICEServer{
+			URLs:       s.URLs,
+			Username:   s.Username,
+			Credential: s.Credential,
+		})
 	}
-
-	var result []webrtc.ICEServer
-	for _, s := range servers {
-		srv, ok := s.(map[string]any)
-		if !ok {
-			continue
-		}
-		var urls []string
-		if rawURLs, ok := srv["urls"].([]any); ok {
-			for _, u := range rawURLs {
-				if us, ok := u.(string); ok {
-					urls = append(urls, us)
-				}
-			}
-		}
-		if len(urls) == 0 {
-			continue
-		}
-		is := webrtc.ICEServer{URLs: urls}
-		if cred, ok := srv["credential"].(string); ok {
-			is.Credential = cred
-		}
-		if user, ok := srv["username"].(string); ok {
-			is.Username = user
-		}
-		result = append(result, is)
+	if len(conn.ClientConfig.ICEServers) > 0 {
+		log.Printf("Telemost ICE servers from API: %d", len(conn.ClientConfig.ICEServers))
 	}
-	return result
+	return servers
 }
 
-// msgType returns the first key in a Goloom WS message that isn't "uid".
-func msgType(msg map[string]any) string {
-	for k := range msg {
-		if k != "uid" {
-			return k
-		}
+// vp8KAFrame is a minimal valid 31-byte libvpx 16×16 black keyframe.
+// Sent at 50Hz when no WG data is available, keeps videoMid bound by SFU.
+var vp8KAFrame = []byte{
+	0x10, 0x02, 0x00, 0x9d, 0x01, 0x2a, 0x10, 0x00,
+	0x10, 0x00, 0x00, 0x47, 0x08, 0x85, 0x85, 0x88,
+	0x85, 0x84, 0x88, 0x02, 0x02, 0x00, 0x0c, 0x0d,
+	0x60, 0x00, 0xfe, 0xff, 0xba, 0xff, 0x40,
+}
+
+// buildVP8Payload wraps wgData into a VP8 keyframe payload.
+// If wgData is nil, returns a keepalive frame (vp8KAFrame with payload descriptor).
+// Frame layout: [0x10][frame_tag 3B][0x9d 0x01 0x2a][W 2B][H 2B][0x57 0x47][len 2B LE][wgData]
+func buildVP8Payload(wgData []byte) []byte {
+	if wgData == nil {
+		payload := make([]byte, 1+len(vp8KAFrame))
+		payload[0] = 0x10
+		copy(payload[1:], vp8KAFrame)
+		return payload
 	}
-	return ""
+	firstPartSize := uint32(len(wgData) + 6)
+	ft := firstPartSize<<5 | (1 << 4)
+	payload := make([]byte, 1+3+3+4+2+len(wgData))
+	payload[0] = 0x10
+	payload[1] = byte(ft)
+	payload[2] = byte(ft >> 8)
+	payload[3] = byte(ft >> 16)
+	payload[4] = 0x9d
+	payload[5] = 0x01
+	payload[6] = 0x2a
+	payload[7] = 0x10
+	payload[8] = 0x00
+	payload[9] = 0x10
+	payload[10] = 0x00
+	payload[11] = 0x57
+	payload[12] = 0x47
+	payload[13] = byte(len(wgData))
+	payload[14] = byte(len(wgData) >> 8)
+	copy(payload[15:], wgData)
+	return payload
+}
+
+// parseVP8WGData extracts WireGuard data from a VP8 keyframe payload.
+// Returns nil if the payload is a keepalive or has wrong magic.
+func parseVP8WGData(payload []byte) []byte {
+	if len(payload) < 15 {
+		return nil
+	}
+	if payload[0] != 0x10 {
+		return nil
+	}
+	if payload[4] != 0x9d || payload[5] != 0x01 || payload[6] != 0x2a {
+		return nil
+	}
+	if payload[11] != 0x57 || payload[12] != 0x47 {
+		return nil
+	}
+	wgLen := int(payload[13]) | int(payload[14])<<8
+	if wgLen == 0 || 15+wgLen > len(payload) {
+		return nil
+	}
+	return payload[15 : 15+wgLen]
 }
 
 func startTelemostWebRTCProxy(ctx context.Context, roomURL string, listenConn net.PacketConn, inCh <-chan []byte, wgAddr *atomic.Value) error {
@@ -154,7 +177,7 @@ func startTelemostWebRTCProxy(ctx context.Context, roomURL string, listenConn ne
 	if err != nil {
 		return fmt.Errorf("fetch telemost connection info: %w", err)
 	}
-	log.Printf("Telemost: room=%s peer=%s ws=%s", conn.RoomID, conn.PeerID, conn.ClientConfig.MediaServerURL)
+	log.Printf("Telemost connection info: roomID=%s peerID=%s wsURL=%s", conn.RoomID, conn.PeerID, conn.ClientConfig.MediaServerURL)
 
 	ws, _, err := websocket.DefaultDialer.Dial(conn.ClientConfig.MediaServerURL, nil)
 	if err != nil {
@@ -172,113 +195,10 @@ func startTelemostWebRTCProxy(ctx context.Context, roomURL string, listenConn ne
 		defer wsMu.Unlock()
 		return ws.WriteJSON(v)
 	}
-	sendAck := func(uid string) {
-		_ = writeJSON(map[string]any{
-			"uid": uid,
-			"ack": map[string]any{"status": map[string]any{"code": "OK"}},
-		})
+
+	pcConfig := webrtc.Configuration{
+		ICEServers: telemostICEConfig(conn),
 	}
-	sendPong := func(uid string) {
-		_ = writeJSON(map[string]any{"uid": uid, "pong": map[string]any{}})
-	}
-
-	errCh := make(chan error, 4)
-
-	// ── Phase 1: Send hello → wait for serverHello → extract TURN credentials ──
-
-	if err := writeJSON(map[string]any{
-		"uid": uuid.New().String(),
-		"hello": map[string]any{
-			"participantMeta": map[string]any{
-				"name":      participantName,
-				"role":      "SPEAKER",
-				"sendAudio": false,
-				"sendVideo": false,
-			},
-			"participantAttributes": map[string]any{
-				"name": participantName,
-				"role": "SPEAKER",
-			},
-			"sendAudio":     true,
-			"sendVideo":     false,
-			"sendSharing":   false,
-			"participantId": conn.PeerID,
-			"roomId":        conn.RoomID,
-			"serviceName":   "telemost",
-			"credentials":   conn.Credentials,
-			"capabilitiesOffer": map[string]any{
-				"offerAnswerMode":        []string{"SEPARATE"},
-				"initialSubscriberOffer": []string{"ON_HELLO"},
-				"slotsMode":              []string{"FROM_CONTROLLER"},
-				"simulcastMode":          []string{"DISABLED"},
-				"selfVadStatus":          []string{"FROM_SERVER"},
-				"dataChannelSharing":     []string{"TO_RTP"},
-			},
-			"sdkInfo": map[string]any{
-				"implementation": "go",
-				"version":        "1.0.0",
-				"userAgent":      "TurnBridge-" + participantName,
-			},
-			"sdkInitializationId": uuid.New().String(),
-			"disablePublisher":    false,
-			"disableSubscriber":   false,
-		},
-	}); err != nil {
-		return fmt.Errorf("send hello: %w", err)
-	}
-
-	// Fallback ICE: STUN + anything from API.
-	iceServers := []webrtc.ICEServer{
-		{URLs: []string{"stun:stun.rtc.yandex.net:3478"}},
-	}
-	for _, s := range conn.ClientConfig.ICEServers {
-		iceServers = append(iceServers, webrtc.ICEServer{
-			URLs: s.URLs, Username: s.Username, Credential: s.Credential,
-		})
-	}
-
-	var buffered []map[string]any
-	deadline := time.Now().Add(15 * time.Second)
-
-	for time.Now().Before(deadline) {
-		_ = ws.SetReadDeadline(deadline)
-		var msg map[string]any
-		if err := ws.ReadJSON(&msg); err != nil {
-			return fmt.Errorf("waiting for serverHello: %w", err)
-		}
-
-		uid, _ := msg["uid"].(string)
-		mt := msgType(msg)
-
-		switch mt {
-		case "ack":
-			continue
-		case "ping":
-			sendPong(uid)
-			continue
-		case "serverHello":
-			sh, _ := msg["serverHello"].(map[string]any)
-			if servers := parseICEServersFromServerHello(sh); len(servers) > 0 {
-				iceServers = servers
-				log.Printf("Telemost TURN from serverHello: %d servers", len(servers))
-			}
-			sendAck(uid)
-			log.Printf("Telemost serverHello received")
-			goto phase2
-		default:
-			sendAck(uid)
-			buffered = append(buffered, msg)
-			log.Printf("Telemost buffered [%s] during phase1", mt)
-		}
-	}
-	return fmt.Errorf("serverHello not received within 15s")
-
-phase2:
-	_ = ws.SetReadDeadline(time.Time{})
-
-	// ── Phase 2: Create PeerConnections WITH TURN credentials ──
-
-	pcConfig := webrtc.Configuration{ICEServers: iceServers}
 
 	pcSub, err := webrtc.NewPeerConnection(pcConfig)
 	if err != nil {
@@ -292,124 +212,19 @@ phase2:
 	}
 	defer pcPub.Close()
 
-	// Audio track: StaticRTP so we can write raw RTP packets (needed for HB=2
-	// verification and for future WG-over-RTP tunneling if DC relay is confirmed
-	// non-functional).
-	audioTrack, err := webrtc.NewTrackLocalStaticRTP(
-		webrtc.RTPCodecCapability{
-			MimeType:    webrtc.MimeTypeOpus,
-			ClockRate:   48000,
-			Channels:    2,
-			SDPFmtpLine: "minptime=10;useinbandfec=1",
-		},
-		"audio",
-		"telemost-ios",
+	// VP8 video track: WG packets are wrapped as VP8 keyframes and sent through SFU.
+	videoTrack, err := webrtc.NewTrackLocalStaticRTP(
+		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeVP8},
+		"video", "turnbridge-vp8",
 	)
 	if err != nil {
-		return fmt.Errorf("create audio track: %w", err)
+		return fmt.Errorf("create VP8 track: %w", err)
 	}
-	if _, err := pcPub.AddTransceiverFromTrack(
-		audioTrack,
-		webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionSendonly},
-	); err != nil {
-		return fmt.Errorf("add audio transceiver: %w", err)
+	if _, err := pcPub.AddTrack(videoTrack); err != nil {
+		return fmt.Errorf("add VP8 track: %w", err)
 	}
 
-	// HB verification: emit HB<mode>-ios-<seq> as Opus RTP. Bridge logs it on OnTrack.
-	// HB=2 = 2s cadence, raw text — Goloom SFU drops (invalid Opus).
-	// HB=3 = 50Hz, 0x78 TOC prefix (SILK NB silence) — passes SFU validation.
-	if telemostHBMode == "2" || telemostHBMode == "3" {
-		go func() {
-			interval := 2 * time.Second
-			logEvery := 1
-			if telemostHBMode == "3" {
-				interval = 20 * time.Millisecond
-				logEvery = 50
-			}
-			t := time.NewTicker(interval)
-			defer t.Stop()
-			var seq uint16
-			var ts uint32
-			counter := 0
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-t.C:
-					seq++
-					ts += 960
-					counter++
-					tag := []byte(fmt.Sprintf("HB%s-ios-%s-%d", telemostHBMode, participantName, seq))
-					payload := tag
-					if telemostHBMode == "3" {
-						payload = append([]byte{0x78}, tag...)
-					}
-					pkt := &rtp.Packet{
-						Header: rtp.Header{
-							Version:        2,
-							PayloadType:    111,
-							SequenceNumber: seq,
-							Timestamp:      ts,
-							Marker:         true,
-						},
-						Payload: payload,
-					}
-					if err := audioTrack.WriteRTP(pkt); err != nil {
-						log.Printf("Telemost HB%s WriteRTP err: %v", telemostHBMode, err)
-						continue
-					}
-					if counter%logEvery == 0 {
-						log.Printf("Telemost HB%s >>> %s (seq=%d)", telemostHBMode, tag, seq)
-					}
-				}
-			}
-		}()
-	}
-
-	// HB verification: log any incoming audio RTP; print tag if it's an HB payload.
-	if telemostHBMode == "2" || telemostHBMode == "3" {
-		pcSub.OnTrack(func(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
-			log.Printf("Telemost HB%s OnTrack: id=%s kind=%s codec=%s ssrc=%d",
-				telemostHBMode, track.ID(), track.Kind(), track.Codec().MimeType, track.SSRC())
-			go func() {
-				buf := make([]byte, 1500)
-				count := 0
-				for {
-					n, _, err := track.Read(buf)
-					if err != nil {
-						log.Printf("Telemost HB%s track.Read err: %v", telemostHBMode, err)
-						return
-					}
-					pkt := &rtp.Packet{}
-					if err := pkt.Unmarshal(buf[:n]); err != nil {
-						continue
-					}
-					count++
-					payload := pkt.Payload
-					if len(payload) > 1 && payload[0] == 0x78 {
-						payload = payload[1:]
-					}
-					if len(payload) > 2 && string(payload[:2]) == "HB" {
-						log.Printf("Telemost HB%s <<< %s (ssrc=%d seq=%d)",
-							telemostHBMode, payload, pkt.SSRC, pkt.SequenceNumber)
-					} else if count%50 == 1 {
-						dumpLen := len(pkt.Payload)
-						if dumpLen > 16 {
-							dumpLen = 16
-						}
-						log.Printf("Telemost HB%s <<< non-HB ssrc=%d seq=%d plen=%d first=%x (cnt=%d)",
-							telemostHBMode, pkt.SSRC, pkt.SequenceNumber, len(pkt.Payload), pkt.Payload[:dumpLen], count)
-					}
-				}
-			}()
-		})
-	}
-
-	// NOTE: no publisher DataChannel. Goloom DC-relay pattern routes WG traffic
-	// over the SHARED subscriber DC (label=default) that the SFU opens via
-	// pcSub.OnDataChannel — same DC for both send and receive. A publisher-only
-	// "_reliable" DC isn't routed by Goloom and closes shortly after open
-	// (observed as "io: read/write on closed pipe" on first WG send).
+	errCh := make(chan error, 4)
 
 	for _, pc := range []*webrtc.PeerConnection{pcSub, pcPub} {
 		pc := pc
@@ -423,6 +238,122 @@ phase2:
 			}
 		})
 	}
+
+	// Signal proxy ready and start VP8 sender when publisher connects.
+	pcPub.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
+		if state != webrtc.PeerConnectionStateConnected {
+			return
+		}
+		select {
+		case proxyReady <- struct{}{}:
+		default:
+		}
+		log.Printf("Telemost VP8 publisher connected, starting 50Hz tunnel sender")
+		go func() {
+			ticker := time.NewTicker(20 * time.Millisecond)
+			defer ticker.Stop()
+			var seq uint16
+			ssrc := uint32(time.Now().UnixNano() & 0xffffffff)
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case wgPkt, ok := <-inCh:
+					if !ok {
+						return
+					}
+					payload := buildVP8Payload(wgPkt)
+					pkt := &rtp.Packet{
+						Header: rtp.Header{
+							Version:        2,
+							PayloadType:    96,
+							SequenceNumber: seq,
+							Timestamp:      uint32(time.Now().UnixNano() / 1e6 * 90),
+							SSRC:           ssrc,
+							Marker:         true,
+						},
+						Payload: payload,
+					}
+					seq++
+					if err := videoTrack.WriteRTP(pkt); err != nil {
+						return
+					}
+					log.Printf("Telemost VP8 WG->video len=%d seq=%d", len(wgPkt), seq-1)
+				case <-ticker.C:
+					// Drain any buffered packet; otherwise send keepalive.
+					var wgPkt []byte
+					select {
+					case wgPkt = <-inCh:
+					default:
+					}
+					var payload []byte
+					if wgPkt != nil {
+						payload = buildVP8Payload(wgPkt)
+						log.Printf("Telemost VP8 WG->video(tick) len=%d seq=%d", len(wgPkt), seq)
+					} else {
+						payload = buildVP8Payload(nil)
+					}
+					pkt := &rtp.Packet{
+						Header: rtp.Header{
+							Version:        2,
+							PayloadType:    96,
+							SequenceNumber: seq,
+							Timestamp:      uint32(time.Now().UnixNano() / 1e6 * 90),
+							SSRC:           ssrc,
+							Marker:         true,
+						},
+						Payload: payload,
+					}
+					seq++
+					if err := videoTrack.WriteRTP(pkt); err != nil {
+						return
+					}
+				}
+			}
+		}()
+	})
+
+	// Subscriber: receive VP8 video from VPS, extract and forward WG packets.
+	pcSub.OnTrack(func(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
+		kind := track.Kind().String()
+		log.Printf("Telemost OnTrack: kind=%s codec=%s ssrc=%d", kind, track.Codec().MimeType, track.SSRC())
+		if kind != "video" {
+			go func() {
+				buf := make([]byte, 1500)
+				for {
+					if _, _, err := track.Read(buf); err != nil {
+						return
+					}
+				}
+			}()
+			return
+		}
+		go func() {
+			buf := make([]byte, 1500)
+			for {
+				n, _, err := track.Read(buf)
+				if err != nil {
+					return
+				}
+				pkt := &rtp.Packet{}
+				if err := pkt.Unmarshal(buf[:n]); err != nil {
+					continue
+				}
+				wgData := parseVP8WGData(pkt.Payload)
+				if wgData == nil {
+					continue
+				}
+				addr, ok := wgAddr.Load().(net.Addr)
+				if !ok {
+					continue
+				}
+				if _, err := listenConn.WriteTo(wgData, addr); err != nil {
+					log.Printf("Telemost VP8 video->WG write failed: %v", err)
+				}
+				log.Printf("Telemost VP8 video->WG len=%d ssrc=%d seq=%d", len(wgData), pkt.SSRC, pkt.SequenceNumber)
+			}
+		}()
+	})
 
 	pcSub.OnICECandidate(func(c *webrtc.ICECandidate) {
 		if c == nil {
@@ -457,237 +388,58 @@ phase2:
 		})
 	})
 
-	// Shared subscriber DC (label=default) carries WG traffic BOTH ways.
-	// Outbound local->remote: wrap in LiveKit DataPacket protobuf and dc.Send.
-	// Inbound remote->local: decode DataPacket, write to WG endpoint.
-	// Goloom drops raw bytes — payload MUST be wrapped.
-	pcSub.OnDataChannel(func(dc *webrtc.DataChannel) {
-		log.Printf("Telemost subscriber DC discovered: label=%s id=%v", dc.Label(), dc.ID())
-		dc.OnOpen(func() {
-			log.Printf("Telemost subDC OPEN: label=%s id=%v", dc.Label(), dc.ID())
-			select {
-			case proxyReady <- struct{}{}:
-			default:
-			}
-			go func() {
-				for pkt := range inCh {
-					if err := dc.Send(encodeDataPacket(pkt)); err != nil {
-						log.Printf("Telemost local->DC send failed: %v", err)
-						return
-					}
-				}
-			}()
-		})
-		dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-			payload, ok := decodeDataPacket(msg.Data)
-			if !ok || len(payload) == 0 {
-				return
-			}
-			addr1, ok := wgAddr.Load().(net.Addr)
-			if !ok {
-				return
-			}
-			if _, err := listenConn.WriteTo(payload, addr1); err != nil {
-				log.Printf("Telemost DC->local write failed: %v", err)
-			}
-		})
-	})
-
-	log.Printf("Telemost proxy started on %s", listenConn.LocalAddr().String())
-
-	// ── Phase 3: Process buffered messages → signaling loop ──
-
-	pubSent := false
-
-	processMsg := func(msg map[string]any) {
-		uid, _ := msg["uid"].(string)
-		mt := msgType(msg)
-
-		switch mt {
-		case "ack", "pong":
-			return
-
-		case "ping":
-			sendPong(uid)
-			return
-
-		case "serverHello":
-			sendAck(uid)
-			return
-
-		case "subscriberSdpOffer":
-			offer, ok := msg["subscriberSdpOffer"].(map[string]any)
-			if !ok || pubSent {
-				sendAck(uid)
-				return
-			}
-			sdp, _ := offer["sdp"].(string)
-			pcSeq, _ := offer["pcSeq"].(float64)
-			log.Printf("Telemost subscriber offer (len=%d)", len(sdp))
-
-			if err := pcSub.SetRemoteDescription(webrtc.SessionDescription{
-				Type: webrtc.SDPTypeOffer, SDP: sdp,
-			}); err != nil {
-				errCh <- fmt.Errorf("set subscriber remote desc: %w", err)
-				return
-			}
-
-			answer, err := pcSub.CreateAnswer(nil)
-			if err != nil {
-				errCh <- fmt.Errorf("create subscriber answer: %w", err)
-				return
-			}
-			if err := pcSub.SetLocalDescription(answer); err != nil {
-				errCh <- fmt.Errorf("set subscriber local desc: %w", err)
-				return
-			}
-
-			_ = writeJSON(map[string]any{
-				"uid": uuid.New().String(),
-				"subscriberSdpAnswer": map[string]any{
-					"pcSeq": int(pcSeq),
-					"sdp":   answer.SDP,
-				},
-			})
-			sendAck(uid)
-
-			time.Sleep(300 * time.Millisecond)
-
-			pubOffer, err := pcPub.CreateOffer(nil)
-			if err != nil {
-				errCh <- fmt.Errorf("create publisher offer: %w", err)
-				return
-			}
-			if err := pcPub.SetLocalDescription(pubOffer); err != nil {
-				errCh <- fmt.Errorf("set publisher local desc: %w", err)
-				return
-			}
-			pubTracks := make([]map[string]any, 0, 2)
-			for _, tr := range pcPub.GetTransceivers() {
-				mid := tr.Mid()
-				if mid == "" {
-					continue
-				}
-				sender := tr.Sender()
-				if sender == nil || sender.Track() == nil {
-					continue
-				}
-				track := sender.Track()
-				var kind string
-				switch track.Kind() {
-				case webrtc.RTPCodecTypeAudio:
-					kind = "AUDIO"
-				case webrtc.RTPCodecTypeVideo:
-					kind = "VIDEO"
-				default:
-					continue
-				}
-				pubTracks = append(pubTracks, map[string]any{
-					"mid":            mid,
-					"transceiverMid": mid,
-					"kind":           kind,
-					"priority":       0,
-					"label":          track.ID(),
-					"codecs":         map[string]any{},
-					"groupId":        1,
-					"description":    "",
-				})
-			}
-			_ = writeJSON(map[string]any{
-				"uid": uuid.New().String(),
-				"publisherSdpOffer": map[string]any{
-					"pcSeq":  1,
-					"sdp":    pubOffer.SDP,
-					"tracks": pubTracks,
-				},
-			})
-			log.Printf("Telemost publisher offer sent")
-			pubSent = true
-			return
-
-		case "publisherSdpAnswer":
-			answer, ok := msg["publisherSdpAnswer"].(map[string]any)
-			if !ok {
-				sendAck(uid)
-				return
-			}
-			sdp, _ := answer["sdp"].(string)
-			log.Printf("Telemost publisher answer (len=%d)", len(sdp))
-			if err := pcPub.SetRemoteDescription(webrtc.SessionDescription{
-				Type: webrtc.SDPTypeAnswer, SDP: sdp,
-			}); err != nil {
-				errCh <- fmt.Errorf("set publisher remote desc: %w", err)
-				return
-			}
-			sendAck(uid)
-
-			// Subscribe to bridge's audio RTP. Required for HB=2 verification
-			// and (once confirmed) for any RTP-based WG tunneling path. Without
-			// this, Goloom sends slotsConfig with 0 audio slots.
-			_ = writeJSON(map[string]any{
-				"uid":            uuid.New().String(),
-				"setSlotsOffset": map[string]any{"offset": 0},
-			})
-			_ = writeJSON(map[string]any{
-				"uid": uuid.New().String(),
-				"setSlots": map[string]any{
-					"slots": []map[string]any{
-						{"width": 320, "height": 180},
-					},
-					"audioSlotsCount":    5,
-					"key":                1,
-					"shutdownAllVideo":   false,
-					"withSelfView":       false,
-					"selfViewVisibility": "HIDE",
-					"gridConfig":         map[string]any{},
-				},
-			})
-			log.Printf("Telemost setSlots sent (audioSlotsCount=5)")
-			return
-
-		case "webrtcIceCandidate":
-			cand, ok := msg["webrtcIceCandidate"].(map[string]any)
-			if !ok {
-				return
-			}
-			candStr, _ := cand["candidate"].(string)
-			target, _ := cand["target"].(string)
-			sdpMid, _ := cand["sdpMid"].(string)
-			sdpMLineIndex, _ := cand["sdpMlineIndex"].(float64)
-			idx := uint16(sdpMLineIndex)
-			init := webrtc.ICECandidateInit{
-				Candidate:     candStr,
-				SDPMid:        &sdpMid,
-				SDPMLineIndex: &idx,
-			}
-			switch target {
-			case "SUBSCRIBER":
-				_ = pcSub.AddICECandidate(init)
-			case "PUBLISHER":
-				_ = pcPub.AddICECandidate(init)
-			}
-			return
-
-		default:
-			// Catch-all: ack unknown messages (setSlots, slotsConfig, slotsMeta, etc.)
-			// Goloom closes WS if ack not received within 9 seconds.
-			log.Printf("Telemost acking [%s]", mt)
-			sendAck(uid)
-			return
-		}
+	// Hello with sendVideo=true so SFU allocates video mid for us.
+	if err := writeJSON(map[string]any{
+		"uid": uuid.New().String(),
+		"hello": map[string]any{
+			"participantMeta": map[string]any{
+				"name":      participantName,
+				"role":      "SPEAKER",
+				"sendAudio": false,
+				"sendVideo": true,
+			},
+			"participantAttributes": map[string]any{
+				"name": participantName,
+				"role": "SPEAKER",
+			},
+			"sendAudio":     false,
+			"sendVideo":     true,
+			"sendSharing":   false,
+			"participantId": conn.PeerID,
+			"roomId":        conn.RoomID,
+			"serviceName":   "telemost",
+			"credentials":   conn.Credentials,
+			"capabilitiesOffer": map[string]any{
+				"offerAnswerMode":        []string{"SEPARATE"},
+				"initialSubscriberOffer": []string{"ON_HELLO"},
+				"slotsMode":              []string{"FROM_CONTROLLER"},
+				"simulcastMode":          []string{"DISABLED"},
+				"selfVadStatus":          []string{"FROM_SERVER"},
+				"dataChannelSharing":     []string{"TO_RTP"},
+			},
+			"sdkInfo": map[string]any{
+				"implementation": "go",
+				"version":        "1.0.0",
+				"userAgent":      "TurnBridge-" + participantName,
+			},
+			"sdkInitializationId": uuid.New().String(),
+			"disablePublisher":    false,
+			"disableSubscriber":   false,
+		},
+	}); err != nil {
+		return fmt.Errorf("send hello: %w", err)
 	}
 
-	for _, msg := range buffered {
-		processMsg(msg)
-	}
-	buffered = nil
+	log.Printf("Telemost VP8 proxy started on %s", listenConn.LocalAddr().String())
 
-	// Keep-alive goroutine.
+	// Keep-alive: WS pings, app pings, and vadActivity.
 	go func() {
 		wsPing := time.NewTicker(30 * time.Second)
 		appPing := time.NewTicker(5 * time.Second)
+		vadTick := time.NewTicker(2 * time.Second)
 		defer wsPing.Stop()
 		defer appPing.Stop()
+		defer vadTick.Stop()
 		for {
 			select {
 			case <-ctx.Done():
@@ -701,12 +453,21 @@ phase2:
 					"uid":  uuid.New().String(),
 					"ping": map[string]any{},
 				})
+			case <-vadTick.C:
+				_ = writeJSON(map[string]any{
+					"uid": uuid.New().String(),
+					"vadActivity": map[string]any{
+						"active": true,
+					},
+				})
 			}
 		}
 	}()
 
 	// Signaling loop.
 	go func() {
+		pubSent := false
+		slotsKey := 1
 		for {
 			var msg map[string]any
 			if err := ws.ReadJSON(&msg); err != nil {
@@ -716,7 +477,177 @@ phase2:
 				}
 				return
 			}
-			processMsg(msg)
+
+			uid, _ := msg["uid"].(string)
+
+			sendAck := func() {
+				_ = writeJSON(map[string]any{
+					"uid": uid,
+					"ack": map[string]any{"status": map[string]any{"code": "OK"}},
+				})
+			}
+
+			if _, ok := msg["serverHello"]; ok {
+				log.Printf("Telemost serverHello received")
+				sendAck()
+			}
+			if _, ok := msg["updateDescription"]; ok {
+				sendAck()
+			}
+			if _, ok := msg["vadActivity"]; ok {
+				sendAck()
+			}
+			if _, ok := msg["slotsConfig"]; ok {
+				sendAck()
+			}
+			if _, ok := msg["ping"]; ok {
+				_ = writeJSON(map[string]any{"uid": uid, "pong": map[string]any{}})
+			}
+
+			if offer, ok := msg["subscriberSdpOffer"].(map[string]any); ok && !pubSent {
+				sdp, _ := offer["sdp"].(string)
+				pcSeq, _ := offer["pcSeq"].(float64)
+				log.Printf("Telemost subscriber offer received (len=%d)", len(sdp))
+
+				if err := pcSub.SetRemoteDescription(webrtc.SessionDescription{
+					Type: webrtc.SDPTypeOffer, SDP: sdp,
+				}); err != nil {
+					select {
+					case errCh <- fmt.Errorf("set subscriber remote desc: %w", err):
+					default:
+					}
+					return
+				}
+
+				answer, err := pcSub.CreateAnswer(nil)
+				if err != nil {
+					select {
+					case errCh <- fmt.Errorf("create subscriber answer: %w", err):
+					default:
+					}
+					return
+				}
+				if err := pcSub.SetLocalDescription(answer); err != nil {
+					select {
+					case errCh <- fmt.Errorf("set subscriber local desc: %w", err):
+					default:
+					}
+					return
+				}
+				_ = writeJSON(map[string]any{
+					"uid": uuid.New().String(),
+					"subscriberSdpAnswer": map[string]any{
+						"pcSeq": int(pcSeq),
+						"sdp":   answer.SDP,
+					},
+				})
+				sendAck()
+
+				time.Sleep(300 * time.Millisecond)
+
+				pubOffer, err := pcPub.CreateOffer(nil)
+				if err != nil {
+					select {
+					case errCh <- fmt.Errorf("create publisher offer: %w", err):
+					default:
+					}
+					return
+				}
+				if err := pcPub.SetLocalDescription(pubOffer); err != nil {
+					select {
+					case errCh <- fmt.Errorf("set publisher local desc: %w", err):
+					default:
+					}
+					return
+				}
+
+				// Extract tracks[] from transceivers — required for setSlots to work.
+				var tracks []map[string]any
+				for _, tr := range pcPub.GetTransceivers() {
+					if tr.Sender() == nil || tr.Sender().Track() == nil {
+						continue
+					}
+					t := tr.Sender().Track()
+					tracks = append(tracks, map[string]any{
+						"mid":            tr.Mid(),
+						"transceiverMid": tr.Mid(),
+						"kind":           t.Kind().String(),
+						"priority":       "HIGH",
+						"label":          t.ID(),
+						"codecs":         map[string]any{},
+						"groupId":        "",
+						"description":    "",
+					})
+				}
+
+				_ = writeJSON(map[string]any{
+					"uid": uuid.New().String(),
+					"publisherSdpOffer": map[string]any{
+						"pcSeq":  1,
+						"sdp":    pubOffer.SDP,
+						"tracks": tracks,
+					},
+				})
+				log.Printf("Telemost publisher offer sent (tracks=%d)", len(tracks))
+				pubSent = true
+			}
+
+			if answer, ok := msg["publisherSdpAnswer"].(map[string]any); ok {
+				sdp, _ := answer["sdp"].(string)
+				log.Printf("Telemost publisher answer received (len=%d)", len(sdp))
+				if err := pcPub.SetRemoteDescription(webrtc.SessionDescription{
+					Type: webrtc.SDPTypeAnswer, SDP: sdp,
+				}); err != nil {
+					select {
+					case errCh <- fmt.Errorf("set publisher remote desc: %w", err):
+					default:
+					}
+					return
+				}
+				sendAck()
+
+				// Send setSlots after publisherSdpAnswer so SFU routes video mids.
+				_ = writeJSON(map[string]any{
+					"uid":            uuid.New().String(),
+					"setSlotsOffset": map[string]any{"offset": 0},
+				})
+				_ = writeJSON(map[string]any{
+					"uid": uuid.New().String(),
+					"setSlots": map[string]any{
+						"slots": []map[string]any{
+							{"label": "video"},
+							{"label": "video"},
+						},
+						"audioSlotsCount":    0,
+						"key":                slotsKey,
+						"shutdownAllVideo":   false,
+						"withSelfView":       false,
+						"selfViewVisibility": "HIDE",
+						"gridConfig":         map[string]any{},
+					},
+				})
+				slotsKey++
+				log.Printf("Telemost setSlots sent (key=%d)", slotsKey-1)
+			}
+
+			if cand, ok := msg["webrtcIceCandidate"].(map[string]any); ok {
+				candStr, _ := cand["candidate"].(string)
+				target, _ := cand["target"].(string)
+				sdpMid, _ := cand["sdpMid"].(string)
+				sdpMLineIndex, _ := cand["sdpMlineIndex"].(float64)
+				idx := uint16(sdpMLineIndex)
+				init := webrtc.ICECandidateInit{
+					Candidate:     candStr,
+					SDPMid:        &sdpMid,
+					SDPMLineIndex: &idx,
+				}
+				switch target {
+				case "SUBSCRIBER":
+					_ = pcSub.AddICECandidate(init)
+				case "PUBLISHER":
+					_ = pcPub.AddICECandidate(init)
+				}
+			}
 		}
 	}()
 

@@ -90,6 +90,45 @@ func fetchTelemostConnectionInfo(roomURL, displayName string) (*telemostConnInfo
 	return &info, nil
 }
 
+// leaveTelemostRoom best-effort notifies Yandex backend that this peer is gone.
+// Without this, Goloom SFU only detects disconnect via WS close + ~30s peer
+// timeout, leaving zombie participants in the room that consume SFU slots.
+// Matches web client's /rooms/{roomId}/leave POST (see _tm_main.js leaveRoomByFetch).
+// We omit mediaSessionId — it's not exposed in the connection-info response.
+func leaveTelemostRoom(conn *telemostConnInfo) {
+	if conn == nil || conn.RoomID == "" || conn.PeerID == "" {
+		return
+	}
+	u, err := url.Parse(fmt.Sprintf("%s/rooms/%s/leave", telemostAPIBase, url.PathEscape(conn.RoomID)))
+	if err != nil {
+		return
+	}
+	q := u.Query()
+	q.Set("peer_id", conn.PeerID)
+	q.Set("peer_token", conn.Credentials)
+	u.RawQuery = q.Encode()
+
+	req, err := http.NewRequest(http.MethodPost, u.String(), nil)
+	if err != nil {
+		return
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64; rv:149.0) Gecko/20100101 Firefox/149.0")
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("Origin", "https://telemost.yandex.ru")
+	req.Header.Set("Referer", "https://telemost.yandex.ru/")
+	req.Header.Set("Idempotency-Key", uuid.New().String())
+
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("Telemost leaveRoom failed: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+	log.Printf("Telemost leaveRoom peer=%s room=%s status=%d", conn.PeerID, conn.RoomID, resp.StatusCode)
+}
+
 func telemostICEConfig(conn *telemostConnInfo) []webrtc.ICEServer {
 	servers := []webrtc.ICEServer{
 		{URLs: []string{"stun:stun.rtc.yandex.net:3478"}},
@@ -173,7 +212,10 @@ func parseVP8WGData(payload []byte) []byte {
 	return payload[15 : 15+wgLen]
 }
 
-func startTelemostWebRTCProxy(ctx context.Context, roomURL string, listenConn net.PacketConn, inCh <-chan []byte, wgAddr *atomic.Value) error {
+func startTelemostWebRTCProxy(ctx context.Context, roomURL string, listenConn net.PacketConn, inCh <-chan []byte, wgAddr *atomic.Value, nTracks int) error {
+	if nTracks < 1 {
+		nTracks = 1
+	}
 	participantName := fmt.Sprintf("turnbridge-ios-%d", time.Now().UnixNano()%100000)
 
 	conn, err := fetchTelemostConnectionInfo(roomURL, participantName)
@@ -187,6 +229,9 @@ func startTelemostWebRTCProxy(ctx context.Context, roomURL string, listenConn ne
 		return fmt.Errorf("dial telemost ws: %w", err)
 	}
 	defer ws.Close()
+	// Best-effort graceful leave so SFU drops us from roster immediately instead
+	// of waiting for its 30s ws-close timeout (which accumulates zombie peers).
+	defer leaveTelemostRoom(conn)
 
 	ws.SetPongHandler(func(string) error {
 		return ws.SetReadDeadline(time.Now().Add(60 * time.Second))
@@ -235,20 +280,24 @@ func startTelemostWebRTCProxy(ctx context.Context, roomURL string, listenConn ne
 		return fmt.Errorf("add audio transceiver: %w", err)
 	}
 
-	// VP8 video track: WG packets are wrapped as VP8 keyframes and sent through SFU.
-	// Must use AddTransceiverFromTrack(sendonly) so the SDP advertises a=sendonly —
-	// AddTrack defaults to sendrecv, which made the SFU expect inbound video and
-	// drop our outbound media.
-	videoTrack, err := webrtc.NewTrackLocalStaticRTP(
-		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeVP8, ClockRate: 90000},
-		"video", "turnbridge-vp8",
-	)
-	if err != nil {
-		return fmt.Errorf("create VP8 track: %w", err)
-	}
-	if _, err := pcPub.AddTransceiverFromTrack(videoTrack,
-		webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionSendonly}); err != nil {
-		return fmt.Errorf("add VP8 transceiver: %w", err)
+	// VP8 video tracks (nTracks parallel): WG packets are wrapped as VP8 keyframes and
+	// distributed across N senders for higher throughput. Each track has its own SSRC
+	// and its own RTP sequence space. All N senders read from the SAME inCh — Go channel
+	// semantics give us automatic round-robin load balancing across tracks.
+	videoTracks := make([]*webrtc.TrackLocalStaticRTP, nTracks)
+	for i := 0; i < nTracks; i++ {
+		vt, err := webrtc.NewTrackLocalStaticRTP(
+			webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeVP8, ClockRate: 90000},
+			fmt.Sprintf("video%d", i), fmt.Sprintf("turnbridge-vp8-%d", i),
+		)
+		if err != nil {
+			return fmt.Errorf("create VP8 track %d: %w", i, err)
+		}
+		if _, err := pcPub.AddTransceiverFromTrack(vt,
+			webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionSendonly}); err != nil {
+			return fmt.Errorf("add VP8 transceiver %d: %w", i, err)
+		}
+		videoTracks[i] = vt
 	}
 
 	errCh := make(chan error, 4)
@@ -282,72 +331,70 @@ func startTelemostWebRTCProxy(ctx context.Context, roomURL string, listenConn ne
 		})
 	}
 
-	// VP8 sender goroutine: start immediately so media flow is present before
-	// the SFU runs its first setSlots pass. Previously it was started from
-	// inside OnConnectionStateChange(Connected), which raced with setSlots
-	// and caused the SFU to reject our video mid.
-	go func() {
-		ticker := time.NewTicker(20 * time.Millisecond)
-		defer ticker.Stop()
-		var seq uint16
-		ssrc := uint32(time.Now().UnixNano() & 0xffffffff)
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case wgPkt, ok := <-inCh:
-				if !ok {
-					return
-				}
+	// VP8 sender goroutines (one per track): all share the same inCh, Go channel
+	// semantics give natural round-robin load-balancing. Each has its own SSRC and
+	// 20ms keepalive ticker. Start immediately so media flow is present before the
+	// SFU runs its first setSlots pass.
+	for i := 0; i < nTracks; i++ {
+		trackIdx := i
+		videoTrack := videoTracks[trackIdx]
+		go func() {
+			ticker := time.NewTicker(20 * time.Millisecond)
+			defer ticker.Stop()
+			var seq uint16
+			var ts uint32
+			ssrc := uint32(time.Now().UnixNano()&0xffffffff) ^ (uint32(trackIdx+1) * 0x9E3779B1)
+			sendFrame := func(wgPkt []byte, tick bool) bool {
 				payload := buildVP8Payload(wgPkt)
 				pkt := &rtp.Packet{
 					Header: rtp.Header{
 						Version:        2,
 						PayloadType:    96,
 						SequenceNumber: seq,
-						Timestamp:      uint32(time.Now().UnixNano() / 1e6 * 90),
+						Timestamp:      ts,
 						SSRC:           ssrc,
 						Marker:         true,
 					},
 					Payload: payload,
 				}
-				seq++
 				if err := videoTrack.WriteRTP(pkt); err != nil {
-					return
+					return false
 				}
-				log.Printf("Telemost VP8 WG->video len=%d seq=%d", len(wgPkt), seq-1)
-			case <-ticker.C:
-				// Drain any buffered packet; otherwise send keepalive.
-				var wgPkt []byte
-				select {
-				case wgPkt = <-inCh:
-				default:
-				}
-				var payload []byte
 				if wgPkt != nil {
-					payload = buildVP8Payload(wgPkt)
-					log.Printf("Telemost VP8 WG->video(tick) len=%d seq=%d", len(wgPkt), seq)
-				} else {
-					payload = buildVP8Payload(nil)
-				}
-				pkt := &rtp.Packet{
-					Header: rtp.Header{
-						Version:        2,
-						PayloadType:    96,
-						SequenceNumber: seq,
-						Timestamp:      uint32(time.Now().UnixNano() / 1e6 * 90),
-						SSRC:           ssrc,
-						Marker:         true,
-					},
-					Payload: payload,
+					tag := ""
+					if tick {
+						tag = "(tick)"
+					}
+					log.Printf("Telemost VP8 WG->video%s[t%d] len=%d seq=%d", tag, trackIdx, len(wgPkt), seq)
 				}
 				seq++
-				if err := videoTrack.WriteRTP(pkt); err != nil {
+				ts += 3000
+				return true
+			}
+			for {
+				select {
+				case <-ctx.Done():
 					return
+				case wgPkt, ok := <-inCh:
+					if !ok {
+						return
+					}
+					if !sendFrame(wgPkt, false) {
+						return
+					}
+				case <-ticker.C:
+					var wgPkt []byte
+					select {
+					case wgPkt = <-inCh:
+					default:
+					}
+					if !sendFrame(wgPkt, wgPkt != nil) {
+						return
+					}
 				}
 			}
-		}
-	}()
+		}()
+	}
 
 	// Subscriber: receive VP8 video from VPS, extract and forward WG packets.
 	pcSub.OnTrack(func(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
@@ -652,17 +699,26 @@ func startTelemostWebRTCProxy(ctx context.Context, roomURL string, listenConn ne
 				sendAck()
 
 				// Send setSlots after publisherSdpAnswer so SFU routes video mids.
+				// Use nTracks slots so the counterpart's N video tracks are all bound.
+				// Each slot MUST carry width/height — Goloom silently drops slots
+				// with missing dimensions (matches VPS-side slotSpecs: first slot
+				// 1280x720, remaining 640x360 as filler).
 				_ = writeJSON(map[string]any{
 					"uid":            uuid.New().String(),
 					"setSlotsOffset": map[string]any{"offset": 0},
 				})
+				slots := make([]map[string]any, nTracks)
+				for si := range slots {
+					if si == 0 {
+						slots[si] = map[string]any{"width": 1280, "height": 720}
+					} else {
+						slots[si] = map[string]any{"width": 640, "height": 360}
+					}
+				}
 				_ = writeJSON(map[string]any{
 					"uid": uuid.New().String(),
 					"setSlots": map[string]any{
-						"slots": []map[string]any{
-							{"label": "video"},
-							{"label": "video"},
-						},
+						"slots":              slots,
 						"audioSlotsCount":    0,
 						"key":                slotsKey,
 						"shutdownAllVideo":   false,
@@ -672,7 +728,7 @@ func startTelemostWebRTCProxy(ctx context.Context, roomURL string, listenConn ne
 					},
 				})
 				slotsKey++
-				log.Printf("Telemost setSlots sent (key=%d)", slotsKey-1)
+				log.Printf("Telemost setSlots sent (key=%d, slots=%d)", slotsKey-1, nTracks)
 			}
 
 			if cand, ok := msg["webrtcIceCandidate"].(map[string]any); ok {

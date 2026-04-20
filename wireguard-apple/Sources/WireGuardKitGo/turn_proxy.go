@@ -1288,23 +1288,22 @@ func StartProxy(cLink *C.char, cFallbackLink *C.char, cPeerAddr *C.char, cLocalA
 			}
 
 		case "telemost":
-			mainInChans := make([]chan []byte, n)
-			for i := range mainInChans {
-				mainInChans[i] = make(chan []byte, 64)
-			}
-			activeDispatch.Store(&dispatchTarget{mainInChans, n})
-			for i := 0; i < n; i++ {
-				ch := mainInChans[i]
-				go func() {
-					err := startTelemostWebRTCProxy(mainCtx, link, listenConn, ch, &wgAddr)
-					if err != nil && !errors.Is(err, context.Canceled) {
-						select {
-						case mainErrCh <- err:
-						default:
-						}
+			// Telemost uses 1 participant × N video tracks (not N participants × 1 track) to
+			// avoid zombie accumulation in the SFU room and scale throughput cleanly. The
+			// dispatcher uses a single channel; N sender goroutines inside the proxy drain
+			// it round-robin across N VP8 tracks.
+			mainInChans := []chan []byte{make(chan []byte, 64*n)}
+			activeDispatch.Store(&dispatchTarget{mainInChans, 1})
+			ch := mainInChans[0]
+			go func() {
+				err := startTelemostWebRTCProxy(mainCtx, link, listenConn, ch, &wgAddr, n)
+				if err != nil && !errors.Is(err, context.Canceled) {
+					select {
+					case mainErrCh <- err:
+					default:
 					}
-				}()
-			}
+				}
+			}()
 
 		case "max":
 			mainInChans := make([]chan []byte, n)
@@ -1451,24 +1450,14 @@ func runDirectProxy(ctx context.Context, link, peerAddrStr string, listenConn ne
 		jazzWg.Wait()
 		return
 	case "telemost":
-		log.Printf("Using Telemost WebRTC provider (n=%d)", n)
-		inChans := make([]chan []byte, n)
-		for i := range inChans {
-			inChans[i] = make(chan []byte, 64)
+		log.Printf("Using Telemost WebRTC provider (nTracks=%d)", n)
+		// 1 participant × N video tracks: single input channel, N senders inside proxy.
+		inChans := []chan []byte{make(chan []byte, 64*n)}
+		activeDispatch.Store(&dispatchTarget{inChans, 1})
+		ch := inChans[0]
+		if err := startTelemostWebRTCProxy(ctx, link, listenConn, ch, wgAddr, n); err != nil && !errors.Is(err, context.Canceled) {
+			log.Printf("Telemost WebRTC failed: %v", err)
 		}
-		activeDispatch.Store(&dispatchTarget{inChans, n})
-		var telWg sync.WaitGroup
-		for i := 0; i < n; i++ {
-			ch := inChans[i]
-			telWg.Add(1)
-			go func() {
-				defer telWg.Done()
-				if err := startTelemostWebRTCProxy(ctx, link, listenConn, ch, wgAddr); err != nil && !errors.Is(err, context.Canceled) {
-					log.Printf("Telemost WebRTC failed: %v", err)
-				}
-			}()
-		}
-		telWg.Wait()
 		return
 	case "max":
 		log.Printf("Using MAX TURN provider")

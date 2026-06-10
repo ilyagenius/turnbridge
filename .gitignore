@@ -57,3 +57,12 @@ build_unsigned_ipa.sh
 my_quick_link.py
 my_quick_link2.py
 .claude
+
+# gomobile / relay build artifacts
+ios-proxy-app/Mobile.xcframework/
+Mobile.xcframework/
+prebuilts/
+relay/relay
+relay/relay-*
+relay/mobile.aar
+relay/mobile-sources.jar
